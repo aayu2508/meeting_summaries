@@ -20,6 +20,7 @@ dist/
 *.mp3
 *.flac
 *.m4a
+*.txt
 data/
 outputs/
 logs/
