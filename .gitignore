@@ -1,0 +1,61 @@
+# --- ENV & SECRETS ---
+.env
+*.env
+
+# --- VIRTUAL ENVIRONMENTS ---
+.venv/
+venv/
+
+# --- PYTHON BUILD / CACHE ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# --- DATA & AUDIO ---
+*.wav
+*.mp3
+*.flac
+*.m4a
+data/
+outputs/
+logs/
+cache/
+
+# --- MODELS & LARGE FILES ---
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.npz
+*.npy
+*.onnx
+models/
+checkpoints/
+experiments/
+snapshots/
+
+# --- JSONS (confidential) ---
+*.json
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+
+# --- BACKUPS / TEMP ---
+*.log
+*.tmp
+*.bak
+src/ingest_asr_diar/.locks/models--Systran--faster-whisper-large-v2/346bb8684801a61c15ce82bcb80c29a63c2d1f94.lock
+src/ingest_asr_diar/.locks/models--Systran--faster-whisper-large-v2/7818adb6de9fa3064d3ff81226fdd675be1f6344.lock
+src/ingest_asr_diar/.locks/models--Systran--faster-whisper-large-v2/bf2a9746382e1aa7ffff6b3a0d137ed9edbd9670c3b87e5d35f5e85e70d0333a.lock
+src/ingest_asr_diar/.locks/models--Systran--faster-whisper-large-v2/c9074644d9d1205686f16d411564729461324b75.lock
+src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/346bb8684801a61c15ce82bcb80c29a63c2d1f94
+src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/7818adb6de9fa3064d3ff81226fdd675be1f6344
+src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/bf2a9746382e1aa7ffff6b3a0d137ed9edbd9670c3b87e5d35f5e85e70d0333a
+src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/c9074644d9d1205686f16d411564729461324b75
+src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/refs/main
