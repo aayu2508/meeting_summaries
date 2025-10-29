@@ -25,6 +25,7 @@ data/
 outputs/
 logs/
 cache/
+*.txt
 
 # --- MODELS & LARGE FILES ---
 *.pt
