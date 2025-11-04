@@ -65,9 +65,6 @@ MAX_SEG_S = 30.0         # split very long turns into <= 30s chunks
 #     return final
 
 def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Merge adjacent same-speaker turns across tiny overlaps and short gaps.
-       No splitting, no relabeling.
-    """
     if not turns:
         return []
 

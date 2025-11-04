@@ -62,3 +62,4 @@ src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/7818adb6de9fa
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/bf2a9746382e1aa7ffff6b3a0d137ed9edbd9670c3b87e5d35f5e85e70d0333a
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/c9074644d9d1205686f16d411564729461324b75
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/refs/main
+download.sh
