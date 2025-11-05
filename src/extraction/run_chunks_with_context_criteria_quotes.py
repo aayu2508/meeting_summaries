@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# run_chat_with_context_criteria_quotes.py
 """
 Rolling context over chunks to extract:
 Idea -> Evaluation Criteria -> Statements (quote + stance).

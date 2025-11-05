@@ -1,8 +1,8 @@
 # diarization.py
-import os, json, math
+import os, json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-
+import argparse
 from dotenv import load_dotenv
 from pyannote.audio import Pipeline
 from pyannote.audio.pipelines.utils.hook import ProgressHook
@@ -12,64 +12,18 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)
 
 MERGE_GAP_S = 1.5        # merge same-speaker pauses shorter than this
 OVERLAP_JOIN_S = 0.05    # also merge tiny overlaps (<= 50 ms)
-MAX_SEG_S = 30.0         # split very long turns into <= 30s chunks
-
-# def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-#     """Merge adjacent same-speaker turns across tiny overlaps and short gaps.
-#        Then split any very long turns into <= MAX_SEG_S pieces.
-#        Finally, relabel speakers deterministically S0, S1, ...
-#     """
-#     if not turns:
-#         return []
-
-#     # sort by time
-#     turns = sorted(turns, key=lambda t: (t["start"], t["end"]))
-
-#     # merge adjacent turns for same speaker
-#     merged: List[Dict[str, Any]] = []
-#     cur = turns[0].copy()
-#     for nxt in turns[1:]:
-#         same = nxt["speaker"] == cur["speaker"]
-#         gap = nxt["start"] - cur["end"]  # negative means tiny overlap
-#         if same and (-OVERLAP_JOIN_S <= gap < MERGE_GAP_S):
-#             # extend current
-#             cur["end"] = max(cur["end"], nxt["end"])
-#         else:
-#             merged.append(cur)
-#             cur = nxt.copy()
-#     merged.append(cur)
-
-#     # split long turns (simple uniform split)
-#     final: List[Dict[str, Any]] = []
-#     for t in merged:
-#         dur = t["end"] - t["start"]
-#         if dur <= MAX_SEG_S:
-#             final.append(t)
-#             continue
-#         n_parts = max(1, math.ceil(dur / MAX_SEG_S))
-#         part_len = dur / n_parts
-#         for i in range(n_parts):
-#             s = t["start"] + i * part_len
-#             e = min(t["end"], s + part_len)
-#             final.append({"start": s, "end": e, "speaker": t["speaker"]})
-
-#     # deterministic relabeling by first appearance order
-#     seen = {}
-#     next_id = 0
-#     for t in final:
-#         lab = t["speaker"]
-#         if lab not in seen:
-#             seen[lab] = f"S{next_id}"
-#             next_id += 1
-#         t["speaker"] = seen[lab]
-#     return final
 
 def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Merge adjacent segments from the SAME speaker if the silence between them is short
+    (<= MERGE_GAP_S) or if there is a tiny boundary overlap (>= -OVERLAP_JOIN_S).
+    - Never merges segments from different speakers.
+    - Does NOT split long turns (we keep them intact).
+    """
     if not turns:
         return []
 
     turns = sorted(turns, key=lambda t: (t["start"], t["end"]))
-
     merged: List[Dict[str, Any]] = []
     cur = turns[0].copy()
 
@@ -77,7 +31,7 @@ def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         same = nxt["speaker"] == cur["speaker"]
         gap = float(nxt["start"]) - float(cur["end"])  # negative => overlap
 
-        # NOTE: inclusive upper bound helps with float equality cases
+        # Inclusive bounds to avoid float precision edge cases.
         if same and (-OVERLAP_JOIN_S <= gap <= MERGE_GAP_S):
             cur["end"] = max(cur["end"], nxt["end"])
         else:
@@ -112,9 +66,7 @@ def diarize(wav_path: Path, num_speakers: Optional[int] = None) -> List[Dict[str
     return turns
 
 def main():
-    import argparse
-
-    ap = argparse.ArgumentParser("Step 2: Speaker Diarization (speech-only)")
+    ap = argparse.ArgumentParser("======================== Speaker Diarization ========================")
     ap.add_argument("--meeting-id", required=True, help="Meeting ID")
     ap.add_argument("--num-speakers", type=int, default=None, help="Optional fixed number of speakers")
     args = ap.parse_args()
@@ -129,10 +81,10 @@ def main():
     print(f"[diar] running diarization on {wav.name} ...")
     raw_turns = diarize(wav, num_speakers=args.num_speakers)
     print(f"[diar] raw segments: {len(raw_turns)}")
-
     raw_json.write_text(json.dumps(raw_turns, indent=2))
+
     merged = merge_microturns(raw_turns)
-    print(f"[diar] merged/split: {len(merged)} (gap<{MERGE_GAP_S:.2f}s, overlap<{OVERLAP_JOIN_S:.2f}")
+    print(f"[diar] merged: {len(merged)} (gap<{MERGE_GAP_S:.2f}s, overlap<{OVERLAP_JOIN_S:.2f}s)")
     clean_json.write_text(json.dumps(merged, indent=2))
 
     print(f"[done] raw:   {raw_json}")

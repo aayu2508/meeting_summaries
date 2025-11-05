@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# run_chunks_with_context.py
 """
 Sequentially send each chunk to GPT-3.5-Turbo with running context memory.
 Each new chunk includes the previous summary so the model "remembers" ideas.

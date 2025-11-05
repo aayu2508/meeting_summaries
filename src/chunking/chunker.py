@@ -3,10 +3,11 @@ import json, math, argparse
 from pathlib import Path
 
 TARGET_TOKENS = 1200    # soft cap per chunk
-HARD_MAX_TOKENS = 1500  # never exceed this
+HARD_MAX_TOKENS = 1500  # never exceed this (except single-turn overflow; see note)
 OVERLAP_RATIO = 0.20    # 20% of previous turns are overlapped into next chunk
 
 def approx_tokens(s: str) -> int:
+    # simple, stable heuristic
     return max(1, math.ceil(len(s) / 4))
 
 def turn_line(t: dict) -> str:
@@ -14,14 +15,22 @@ def turn_line(t: dict) -> str:
     txt = (t.get("text") or "").strip()
     return f"{spk}: {txt}\n"
 
-def chunk_by_turns(turns: list,
-                   target_tokens: int = TARGET_TOKENS,
-                   hard_max: int = HARD_MAX_TOKENS,
-                   overlap_ratio: float = OVERLAP_RATIO) -> list:
-    # 1) drop non-speech + empty text
+def chunk_by_turns(
+    turns: list,
+    target_tokens: int = TARGET_TOKENS,
+    hard_max: int = HARD_MAX_TOKENS,
+    overlap_ratio: float = OVERLAP_RATIO
+) -> list:
+    # keep speech with non-empty text
     turns = [t for t in turns if t.get("type") == "speech" and (t.get("text") or "").strip()]
     if not turns:
         return []
+
+    # ensure chronological order (defensive)
+    turns = sorted(
+        turns,
+        key=lambda t: (float(t.get("start", 0.0)), float(t.get("end", 0.0)))
+    )
 
     chunks, i, n = [], 0, len(turns)
     while i < n:
@@ -31,7 +40,14 @@ def chunk_by_turns(turns: list,
             line = turn_line(turns[j])
             tcount = approx_tokens(line)
 
-            # stop at soft cap; allow one overflow unless it breaks hard cap
+            # If a single turn alone exceeds hard max and cur is empty,
+            # accept it as its own chunk (documented single-turn overflow).
+            # This avoids infinite loops and preserves turn coherence.
+            if not cur and tcount > hard_max:
+                cur.append(turns[j]); tokens += tcount; j += 1
+                break
+
+            # Stop at soft cap; allow one overflow turn unless it breaks hard cap
             if cur and (tokens + tcount) > target_tokens:
                 if (tokens + tcount) > hard_max:
                     break
@@ -39,15 +55,19 @@ def chunk_by_turns(turns: list,
                 cur.append(turns[j]); tokens += tcount; j += 1
                 break
 
+            # normal add
             cur.append(turns[j]); tokens += tcount; j += 1
 
         # finalize this chunk
-        text = "".join(turn_line(t) for t in cur).strip()
+        start = float(cur[0].get("start", 0.0))
+        end   = float(cur[-1].get("end", start))
+        text  = "".join(turn_line(t) for t in cur).strip()
         speakers = sorted({t.get("speaker") for t in cur})
+
         chunk = {
             "chunk_id": len(chunks),
-            "start": round(float(cur[0]["start"]), 3),
-            "end":   round(float(cur[-1]["end"]), 3),
+            "start": round(start, 3),
+            "end":   round(end, 3),
             "speakers": speakers,
             "num_turns": len(cur),
             "approx_tokens": tokens,
