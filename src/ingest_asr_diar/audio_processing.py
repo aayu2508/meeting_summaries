@@ -2,7 +2,7 @@
 
 import argparse
 from pathlib import Path
-from .audio_utils import prepare_wav, get_media_duration_seconds
+from audio_utils import prepare_wav, get_media_duration_seconds
 
 def main():
     ap = argparse.ArgumentParser("======================== Audio Preprocessing ========================")
@@ -18,11 +18,7 @@ def main():
     wav_out = out_dir / "audio_16k_mono.wav"
 
     print(f"[prep] converting to mono 16 kHz -> {wav_out}")
-    try:
-        prepare_wav(in_path, wav_out)
-    except FFmpegError as e:
-        print(f"[error] ffmpeg failed: {e}")
-        return
+    prepare_wav(in_path, wav_out)
 
     # Log durations before/after
     in_dur = get_media_duration_seconds(in_path)
