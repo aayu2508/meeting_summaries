@@ -63,3 +63,5 @@ src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/bf2a9746382e1
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/c9074644d9d1205686f16d411564729461324b75
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/refs/main
 download.sh
+amicorpus/ES2002a/audio/ES2002a.Mix-Headset.wav.1
+CCBY4.0.txt.1

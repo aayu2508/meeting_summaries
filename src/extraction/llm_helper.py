@@ -77,3 +77,10 @@ def chat_json(
 def norm_key(s: str) -> str:
     base = " ".join((s or "").lower().strip().split())
     return hashlib.md5(base.encode("utf-8")).hexdigest()
+
+# Canonicalizes idea text for consistent comparison
+def canonical_idea_text(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[-_]", " ", s) 
+    return s

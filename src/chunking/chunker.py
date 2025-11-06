@@ -64,6 +64,17 @@ def chunk_by_turns(
         text  = "".join(turn_line(t) for t in cur).strip()
         speakers = sorted({t.get("speaker") for t in cur})
 
+        # NEW: precise per-turn spans (no IDs)
+        spans = [
+            {
+                "start": round(float(t.get("start", 0.0)), 3),
+                "end":   round(float(t.get("end", 0.0)), 3),
+                "speaker": t.get("speaker", "S?"),
+                "text": (t.get("text") or "").strip()
+            }
+            for t in cur
+        ]
+
         chunk = {
             "chunk_id": len(chunks),
             "start": round(start, 3),
@@ -71,8 +82,9 @@ def chunk_by_turns(
             "speakers": speakers,
             "num_turns": len(cur),
             "approx_tokens": tokens,
-            "turn_ids": [t.get("segment_id") for t in cur if t.get("segment_id")],
-            "text": text,
+            # REMOVED: "turn_ids"
+            "spans": spans,          # ← use these for LLM prompts + timelines
+            "text": text,            # keep for quick inspection/back-compat
         }
         chunks.append(chunk)
 
