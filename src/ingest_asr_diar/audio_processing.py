@@ -2,10 +2,10 @@
 
 import argparse
 from pathlib import Path
-from audio_utils import prepare_wav, get_media_duration_seconds
+from .audio_utils import prepare_wav, get_media_duration_seconds
 
 def main():
-    ap = argparse.ArgumentParser("======================== Audio Preprocessing ========================")
+    ap = argparse.ArgumentParser("Audio Preprocessing")
     ap.add_argument("--input", required=True, help="Path to audio/video file")
     ap.add_argument("--meeting-id", required=True, help="Meeting ID")
     args = ap.parse_args()

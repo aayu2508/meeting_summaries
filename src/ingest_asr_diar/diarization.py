@@ -10,7 +10,7 @@ from pyannote.audio.pipelines.utils.hook import ProgressHook
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
-MERGE_GAP_S = 1.5        # merge same-speaker pauses shorter than this
+MERGE_GAP_S = 3        # merge same-speaker pauses shorter than this
 OVERLAP_JOIN_S = 0.05    # also merge tiny overlaps (<= 50 ms)
 
 def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -66,7 +66,7 @@ def diarize(wav_path: Path, num_speakers: Optional[int] = None) -> List[Dict[str
     return turns
 
 def main():
-    ap = argparse.ArgumentParser("======================== Speaker Diarization ========================")
+    ap = argparse.ArgumentParser("Speaker Diarization")
     ap.add_argument("--meeting-id", required=True, help="Meeting ID")
     ap.add_argument("--num-speakers", type=int, default=None, help="Optional fixed number of speakers")
     args = ap.parse_args()
