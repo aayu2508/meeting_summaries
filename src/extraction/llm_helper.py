@@ -39,6 +39,7 @@ def chat_json(
     system_prompt: str,
     user_prompt: str,
     temperature: float = 0.3,
+    max_tokens: int = 1024,
     max_retries: int = 3,
     backoff: float = 0.6
 ) -> Dict[str, Any]:

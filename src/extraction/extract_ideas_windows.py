@@ -2,7 +2,7 @@
 import json, re
 import argparse
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from .llm_helper import init_client, chat_json, norm_key, canonical_idea_text
 
 SYSTEM_PROMPT = """You extract MAJOR IDEAS from meeting chunks and cite verbatim evidence spans.
@@ -58,6 +58,8 @@ Only extract ideas that contribute to: "{topic}".
 If uncertain whether an idea is on-topic, exclude it.
 """
 
+# ------------------------ Helpers ------------------------
+
 # Loads simple key=value metadata file
 def load_kv_file(path: Path) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
@@ -99,11 +101,59 @@ def _merge_windows(windows: List[List[float]], eps: float = 0.25) -> List[List[f
             merged.append(w)
     return merged
 
+def _overlap_len(a0: float, a1: float, b0: float, b1: float) -> float:
+    start = max(a0, b0)
+    end = min(a1, b1)
+    return max(0.0, end - start)
+
+def _best_span_key_for_mention(spans: List[Dict[str, Any]],
+                               mention_s: float,
+                               mention_e: float,
+                               mention_spk: str,
+                               chunk_id: int) -> Optional[str]:
+    best_key = None
+    best_overlap = 0.0
+    best_span_len = 0.0
+    mention_sid = mention_spk.strip() if mention_spk else ""
+
+    for idx, sp in enumerate(spans or []):
+        if sp.get("type") != "speech":
+            continue
+        sp_s = float(sp.get("start", 0.0))
+        sp_e = float(sp.get("end", sp_s))
+        if sp_e < sp_s:
+            sp_s, sp_e = sp_e, sp_s
+
+        ov = _overlap_len(mention_s, mention_e, sp_s, sp_e)
+        if ov <= 0.0:
+            continue
+
+        sp_spk = (sp.get("speaker") or "").strip()
+        same_speaker = (not mention_sid) or (sp_spk == mention_sid)
+        span_len = sp_e - sp_s
+
+        take = False
+        if best_key is None:
+            take = True
+        else:
+            # Prefer same-speaker if possible, otherwise maximize overlap then length
+            if same_speaker and best_overlap == 0.0:
+                take = True
+            elif ov > best_overlap or (ov == best_overlap and span_len > best_span_len):
+                take = True
+
+        if take:
+            best_key = f"{chunk_id}#{idx}"
+            best_overlap = ov
+            best_span_len = span_len
+
+    return best_key
+
 def merge_ideas_windows(state: Dict[str, Any],
                         ideas_payload: List[Dict[str, Any]],
                         cid: int,
                         eps: float = 0.25) -> Dict[str, Any]:
-    
+
     out = dict(state)
     # Build index of existing ideas by normalized key
     by_key = {}
@@ -140,13 +190,16 @@ def merge_ideas_windows(state: Dict[str, Any],
             row["first_seen"] = min(row["first_seen"], s)
             row["last_seen"]  = max(row["last_seen"],  e)
 
-            # persist mention with cid and optional quote
+            # persist mention with cid, segment_id, and optional quote
             mention = {
                 "start": s,
                 "end": e,
                 "speaker": (m.get("speaker") or "").strip(),
-                "cid": int(cid)
+                "cid": int(cid)  # keep for traceability/back-compat
             }
+            if m.get("segment_id"):
+                mention["segment_id"] = m["segment_id"]
+
             q = (m.get("quote") or "").strip()
             if q:
                 mention["quote"] = q[:200]
@@ -172,7 +225,7 @@ def merge_ideas_windows(state: Dict[str, Any],
     return out
 
 def main():
-    ap = argparse.ArgumentParser(description="Extract ideas from meeting chunks with window tracking")
+    ap = argparse.ArgumentParser(description="Extract ideas from meeting chunks with window tracking + segment ids")
     ap.add_argument("--meeting-id", required=True, help="e.g., ES2002a")
     ap.add_argument("--model", default="gpt-3.5-turbo")
     ap.add_argument("--temperature", type=float, default=0.2)
@@ -240,8 +293,8 @@ def main():
         if not isinstance(step_ideas, list):
             step_ideas = []
 
-        # Keep only well-formed mentions (preserve optional 'quote')
         clean_payload = []
+        spans_this_chunk = c.get("spans", []) or []
         for it in step_ideas:
             idea = (it.get("idea") or "").strip()
             mentions = []
@@ -250,8 +303,24 @@ def main():
                     s = float(m.get("start", 0.0))
                     e = float(m.get("end", s))
                     spk = (m.get("speaker") or "").strip()
-                    if e < s: s, e = e, s
+                    if e < s:
+                        s, e = e, s
+
                     rec = {"start": s, "end": e, "speaker": spk}
+
+                    # attach best-matching segment_id from this chunk
+                    seg_id = _best_span_key_for_mention(
+                        spans=spans_this_chunk,
+                        mention_s=s, mention_e=e,
+                        mention_spk=spk,
+                        chunk_id=c["chunk_id"]
+                    )
+                    if seg_id:
+                        rec["segment_id"] = seg_id
+
+                    # keep cid for traceability/back-compat
+                    rec["cid"] = int(c["chunk_id"])
+
                     q = (m.get("quote") or "").strip()
                     if q:
                         rec["quote"] = q[:200]
