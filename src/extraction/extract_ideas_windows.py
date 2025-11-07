@@ -5,37 +5,40 @@ from pathlib import Path
 from typing import Dict, Any, List
 from .llm_helper import init_client, chat_json, norm_key, canonical_idea_text
 
-SYSTEM_PROMPT = """You extract MAJOR IDEAS from meeting chunks.
+SYSTEM_PROMPT = """You extract MAJOR IDEAS from meeting chunks and cite verbatim evidence spans.
+
 Output STRICTLY as JSON:
 {
   "ideas": [
     {
-      "idea": "concise idea",
+      "idea": "concise major idea (<= 8 words; canonical phrasing)",
       "mentions": [
-        { "start": 430.012, "end": 432.145, "speaker": "SPEAKER_00" }
+        { "start": 430.012, "end": 432.145, "speaker": "SPEAKER_00", "quote": "verbatim <=200 chars" }
       ]
     }
   ]
 }
 
 Definitions & rules:
-- "Major idea" = a concise, self-contained proposal/claim/feature/decision (≤ 8 words).
-- Only include ideas DIRECTLY about the provided topic.
-- Be faithful to the text; DO NOT invent.
-- Normalize wording and dedupe near-duplicates (see normalization).
+- The idea label should be a well-phrased canonical summary, not necessarily a direct quote.
+- Include only ideas that directly contribute to the provided topic (strict topic anchoring).
+- Be faithful to the text; DO NOT invent content not present in the chunk.
+- Normalize and dedupe near-duplicates (see normalization).
 - Exclude meta/administrative chatter and vague sentiments without a concrete claim.
-- Exclude criteria-only statements unless the idea itself is explicit.
+- Exclude criteria-only statements unless the underlying idea is explicit.
 
 Normalization:
-- Convert to a short noun phrase or imperative (≤ 8 words).
-- Lowercase except proper nouns/acronyms (keep “AWS”, “HIPAA”).
-- Remove filler words/hedges (“maybe”, “please”, “I think”).
-- Merge equivalent phrasings conservatively: { "kanban board", "task board" } → "task board".
+- Convert to a short noun phrase or imperative (<= 8 words).
+- Lowercase except proper nouns/acronyms (e.g., "AWS", "HIPAA").
+- Remove filler/hedges (“maybe”, “please”, “I think”).
+- Merge equivalent phrasings conservatively: { "kanban board", "task board" } -> "task board".
+- Prefer patterns like "do X with Y" / "use X for Y" / "turn X into Y" when present.
 
-Important:
-- Identify the *exact* spans (start/end/speaker) where each idea is actually stated or advanced.
-- Use ONLY the provided turns when creating mentions.
-- Return at most 8 ideas per chunk; prefer precision over recall.
+Evidence requirements:
+- For each idea, provide 1-3 mentions where the idea is stated, advanced, or explicitly endorsed.
+- Each mention MUST include exact start/end/speaker and a verbatim quote (<=200 chars).
+- If the idea spans adjacent text by the same speaker, pick a window that covers the unified utterance.
+- Prefer quotes containing decision/evaluation language (“we can…”, “let’s…”, “turn X into Y”).
 """
 
 USER_TEMPLATE = """# METADATA
@@ -81,32 +84,53 @@ def _render_turns_block(spans: List[Dict[str, Any]]) -> str:
         lines.append(f"[{s:.3f}–{e:.3f}] {spk}: {txt}")
     return "\n".join(lines)
 
+def _merge_windows(windows: List[List[float]], eps: float = 0.25) -> List[List[float]]:
+    if not windows:
+        return []
+    ws = sorted([[float(a), float(b), int(c)] for a, b, c in windows], key=lambda w: (w[0], w[1], w[2]))
+    merged = []
+    for w in ws:
+        if not merged:
+            merged.append(w); continue
+        prev = merged[-1]
+        if w[0] <= prev[1] + eps:  # overlap/adjacent -> extend
+            prev[1] = max(prev[1], w[1])
+        else:
+            merged.append(w)
+    return merged
+
 def merge_ideas_windows(state: Dict[str, Any],
                         ideas_payload: List[Dict[str, Any]],
                         cid: int,
                         eps: float = 0.25) -> Dict[str, Any]:
-    """
-    state = { "metadata": {...}, "ideas": [ {idea, first_seen, last_seen, windows:[[s,e,cid], ...]} ] }
-    ideas_payload = [
-      { "idea": "…", "mentions": [ {"start":..,"end":..,"speaker":"…"}, ... ] },
-      ...
-    ]
-    """
+    
     out = dict(state)
-    by_key = {norm_key(canonical_idea_text(i["idea"])): i
-              for i in out.get("ideas", []) if i.get("idea")}
+    # Build index of existing ideas by normalized key
+    by_key = {}
+    for i in out.get("ideas", []):
+        key = norm_key(canonical_idea_text(i.get("idea","")))
+        if not key:
+            continue
+        by_key[key] = i
 
     for row_in in (ideas_payload or []):
         idea_txt = canonical_idea_text((row_in.get("idea") or "").strip())
         if not idea_txt:
             continue
+
         k = norm_key(idea_txt)
         row = by_key.get(k)
         if not row:
-            row = {"idea": idea_txt, "first_seen": float("inf"), "last_seen": float("-inf"), "windows": []}
+            row = {
+                "idea": idea_txt,
+                "first_seen": float("inf"),
+                "last_seen": float("-inf"),
+                "windows": [],
+                "mentions": []
+            }
             by_key[k] = row
 
-        # collect windows from mentions
+        # collect windows AND mentions from this chunk
         for m in (row_in.get("mentions") or []):
             s = float(m.get("start", 0.0))
             e = float(m.get("end", s))
@@ -116,27 +140,35 @@ def merge_ideas_windows(state: Dict[str, Any],
             row["first_seen"] = min(row["first_seen"], s)
             row["last_seen"]  = max(row["last_seen"],  e)
 
-    # coalesce windows per idea
+            # persist mention with cid and optional quote
+            mention = {
+                "start": s,
+                "end": e,
+                "speaker": (m.get("speaker") or "").strip(),
+                "cid": int(cid)
+            }
+            q = (m.get("quote") or "").strip()
+            if q:
+                mention["quote"] = q[:200]
+            row["mentions"].append(mention)
+
+    # coalesce windows and normalize first/last per idea
+    ideas_out: List[Dict[str, Any]] = []
     for row in by_key.values():
-        ws = sorted(row["windows"], key=lambda w: (w[0], w[1], w[2]))
-        merged = []
-        for w in ws:
-            if not merged:
-                merged.append(w); continue
-            prev = merged[-1]
-            if w[0] <= prev[1] + eps:         # overlap/adjacent -> extend
-                prev[1] = max(prev[1], w[1])
-            else:
-                merged.append(w)
-        row["windows"] = merged
-        if merged:
-            row["first_seen"] = merged[0][0]
-            row["last_seen"]  = merged[-1][1]
+        merged_windows = _merge_windows(row["windows"], eps=eps)
+        row["windows"] = merged_windows
+        if merged_windows:
+            row["first_seen"] = merged_windows[0][0]
+            row["last_seen"]  = merged_windows[-1][1]
         else:
             row["first_seen"] = float("inf")
             row["last_seen"]  = float("-inf")
 
-    out["ideas"] = sorted(by_key.values(), key=lambda r: (r.get("first_seen", 1e18), r.get("idea", "")))
+        # sort mentions by time for readability
+        row["mentions"] = sorted(row["mentions"], key=lambda m: (m["start"], m["end"]))
+        ideas_out.append(row)
+
+    out["ideas"] = sorted(ideas_out, key=lambda r: (r.get("first_seen", 1e18), r.get("idea","")))
     return out
 
 def main():
@@ -198,10 +230,7 @@ def main():
             temperature=args.temperature
         )
 
-        # Expected: { "ideas": [ { "idea": "...", "mentions": [ {start,end,speaker}, ... ] } ] }
         step_ideas = step.get("ideas") if isinstance(step, dict) else []
-
-        # Back-compat fallback: if it's a list of strings, treat the whole chunk as one window
         if isinstance(step_ideas, list) and step_ideas and isinstance(step_ideas[0], str):
             step_ideas = [
                 {"idea": s, "mentions": [{"start": c["start"], "end": c["end"], "speaker": ""}]}
@@ -211,7 +240,7 @@ def main():
         if not isinstance(step_ideas, list):
             step_ideas = []
 
-        # Keep only well-formed mentions
+        # Keep only well-formed mentions (preserve optional 'quote')
         clean_payload = []
         for it in step_ideas:
             idea = (it.get("idea") or "").strip()
@@ -222,7 +251,11 @@ def main():
                     e = float(m.get("end", s))
                     spk = (m.get("speaker") or "").strip()
                     if e < s: s, e = e, s
-                    mentions.append({"start": s, "end": e, "speaker": spk})
+                    rec = {"start": s, "end": e, "speaker": spk}
+                    q = (m.get("quote") or "").strip()
+                    if q:
+                        rec["quote"] = q[:200]
+                    mentions.append(rec)
                 except Exception:
                     continue
             if idea and mentions:

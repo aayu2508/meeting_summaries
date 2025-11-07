@@ -64,16 +64,24 @@ def chunk_by_turns(
         text  = "".join(turn_line(t) for t in cur).strip()
         speakers = sorted({t.get("speaker") for t in cur})
 
-        # NEW: precise per-turn spans (no IDs)
-        spans = [
-            {
+        # include SER & other useful fields per span (if present)
+        spans = []
+        for t in cur:
+            span = {
                 "start": round(float(t.get("start", 0.0)), 3),
                 "end":   round(float(t.get("end", 0.0)), 3),
                 "speaker": t.get("speaker", "S?"),
                 "text": (t.get("text") or "").strip()
             }
-            for t in cur
-        ]
+            # carry-through fields if available in the input:
+            # (safe to include; absent keys just won't appear)
+            for k in ("segment_id", "overlap", "type"):
+                if k in t:
+                    span[k] = t[k]
+            if "emotion" in t and isinstance(t["emotion"], dict):
+                # keep the full SER object (valence, arousal, dominance, prosody, z-scores, etc.)
+                span["emotion"] = t["emotion"]
+            spans.append(span)
 
         chunk = {
             "chunk_id": len(chunks),
@@ -82,8 +90,7 @@ def chunk_by_turns(
             "speakers": speakers,
             "num_turns": len(cur),
             "approx_tokens": tokens,
-            # REMOVED: "turn_ids"
-            "spans": spans,          # ← use these for LLM prompts + timelines
+            "spans": spans,          # now includes emotion if present on the input turns
             "text": text,            # keep for quick inspection/back-compat
         }
         chunks.append(chunk)
@@ -97,8 +104,8 @@ def chunk_by_turns(
     return chunks
 
 def main():
-    ap = argparse.ArgumentParser(description="Minimal turn-based chunker")
-    ap.add_argument("--in",  dest="in_path",  type=Path, required=True, help="Input JSON (turns with text)")
+    ap = argparse.ArgumentParser(description="Minimal turn-based chunker (preserves SER in spans if present)")
+    ap.add_argument("--in",  dest="in_path",  type=Path, required=True, help="Input JSON (turns with text, optionally with SER)")
     ap.add_argument("--out", dest="out_path", type=Path, required=True, help="Output JSON (chunks)")
     ap.add_argument("--target-tokens", type=int, default=TARGET_TOKENS)
     ap.add_argument("--hard-max",      type=int, default=HARD_MAX_TOKENS)

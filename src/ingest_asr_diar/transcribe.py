@@ -195,7 +195,7 @@ def build_timeline(
     return timeline
 
 def main():
-    ap = argparse.ArgumentParser("======================== Transcription ========================")
+    ap = argparse.ArgumentParser("Transcription")
     ap.add_argument("--meeting-id", required=True, help="Meeting ID")
     args = ap.parse_args()
 

@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any, Tuple, Optional
 import numpy as np
 import librosa
 from tqdm import tqdm
@@ -210,7 +210,6 @@ class SERWrapper:
             label = self.id2label[idx].lower() if self.id2label else "neutral"
             conf = float(prob[0, idx].cpu().item())
             return label, conf
-
 
 def collect_speaker_stats(segments):
     stats = {}
