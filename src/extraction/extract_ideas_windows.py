@@ -20,10 +20,11 @@ Output STRICTLY as JSON:
 }
 
 Definitions & rules:
-- The idea label should be a well-phrased canonical summary, not necessarily a direct quote.
+- An IDEA must be an actionable use/proposal or a positive claim that advances the topic (e.g., “use X for Y”, “turn X into Y”, “prioritize X over Y”, “deploy X program”).
+- REJECT non-ideas: problem statements, challenges, risks, limitations, constraints, complaints, feasibility doubts, or meta commentary.
+- If the source text only talks about a problem without proposing a solution, DO NOT extract an idea.
 - Include only ideas that directly contribute to the provided topic (strict topic anchoring).
 - Be faithful to the text; DO NOT invent content not present in the chunk.
-- Normalize and dedupe near-duplicates (see normalization).
 - Exclude meta/administrative chatter and vague sentiments without a concrete claim.
 - Exclude criteria-only statements unless the underlying idea is explicit.
 
@@ -38,7 +39,7 @@ Evidence requirements:
 - For each idea, provide 1-3 mentions where the idea is stated, advanced, or explicitly endorsed.
 - Each mention MUST include exact start/end/speaker and a verbatim quote (<=200 chars).
 - If the idea spans adjacent text by the same speaker, pick a window that covers the unified utterance.
-- Prefer quotes containing decision/evaluation language (“we can…”, “let’s…”, “turn X into Y”).
+- Prefer quotes containing decision/evaluation language (“we can…”, “let's…”, “turn X into Y”).
 """
 
 USER_TEMPLATE = """# METADATA
