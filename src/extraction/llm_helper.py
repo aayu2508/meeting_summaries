@@ -1,5 +1,5 @@
 # llm_helper.py
-import os, json, re, time
+import os, json, re, time, hashlib
 from typing import Any, Dict, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -24,6 +24,10 @@ def _resolve_model(name: str) -> str:
 # For non-GPT-5 models (e.g., 3.5), it transparently falls back to normal responses.
 def _supports_json_mode(model: str) -> bool:
     return model.startswith("gpt-5")
+
+# GPT-5 family expects 'max_completion_tokens' instead of 'max_tokens'
+def _uses_max_completion_tokens(model_id: str) -> bool:
+    return model_id.startswith("gpt-5")
 
 def init_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
@@ -56,8 +60,7 @@ def chat_json(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    temperature: float = 0.3,
-    max_tokens: int = 1024,
+    max_tokens: int = 2048,
     max_retries: int = 3,
     backoff: float = 0.6,
     reasoning_effort: Optional[str] = None,   # e.g., "minimal"
@@ -70,13 +73,16 @@ def chat_json(
     # Base payload used across attempts
     base_payload = {
         "model": model_id,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     }
+
+    if _uses_max_completion_tokens(model_id):
+        base_payload["max_completion_tokens"] = max_tokens
+    else:
+        base_payload["max_tokens"] = max_tokens
 
     json_mode_payload = dict(base_payload)
     if _supports_json_mode(model_id):
@@ -90,7 +96,7 @@ def chat_json(
         try:
             try:
                 r = client.chat.completions.create(**json_mode_payload)
-            except Exception:
+            except Exception as e:
                 r = client.chat.completions.create(**base_payload)
 
             raw = r.choices[0].message.content or ""
@@ -99,13 +105,17 @@ def chat_json(
             except Exception:
                 repair_payload = {
                     "model": model_id,
-                    "temperature": 0.0,
-                    "max_tokens": max_tokens,
                     "messages": [
                         {"role": "system", "content": "You fix JSON. Return ONLY valid JSON."},
                         {"role": "user", "content": f"Fix to valid JSON only:\n\n{raw}"},
                     ],
                 }
+
+                if _uses_max_completion_tokens(model_id):
+                    repair_payload["max_completion_tokens"] = max_tokens
+                else:
+                    repair_payload["max_tokens"] = max_tokens
+
                 if _supports_json_mode(model_id):
                     repair_payload["response_format"] = {"type": "json_object"}
                     if reasoning_effort is not None:
@@ -121,3 +131,13 @@ def chat_json(
             backoff *= 2
 
     return {"_error": str(last_err) if last_err else "unknown_error"}
+
+def norm_key(s: str) -> str:
+    base = " ".join((s or "").lower().strip().split())
+    return hashlib.md5(base.encode("utf-8")).hexdigest()
+
+def canonical_idea_text(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[-_]", " ", s)
+    return s
