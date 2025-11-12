@@ -11,20 +11,24 @@ Return ONLY this JSON:
     {
       "idea": "concise major idea (<= 10 words)",
       "mentions": [
-        { "start": 430.012, "end": 432.145, "speaker": "SPEAKER_00" }
+        { "start": 430.012, "end": 432.145, "speaker": " " }
       ]
     }
   ]
 }
 
 Extraction rules:
-- Extract all actionable ideas that advance the topic in this CHUNK; do not omit relevant ideas.
-- Exclude problems, risks, complaints, vague notions, logistics, and criteria-only text.
+- Extract all actionable ideas that advance the topic; do not omit relevant ideas.
+- Exclude problems, risks, complaints, logistics.
 - Paraphrase each major idea into a concise, clear phrase with proper grammar.
-- Be faithful to the source; do not invent.
+- Be faithful to the source; do not invent any idea.
 - Provide all mentions per idea with accurate timestamps and speaker labels (no quotes, no extra fields).
+- SPEAKER COVERAGE: If multiple speakers paraphrase or build on the SAME idea within this chunk, include a separate mention for EACH speaker with accurate time spans.
+- TIMESTAMPS: Mentions must align with supplied TURNS; do not cite text outside the chunk window.
+- OUTPUT: JSON only. No extra keys. No commentary.
 
-Output JSON only. No explanations.
+# NOTE
+If the speakers briefly affirms an idea within a few seconds (e.g., “yeah/okay/right/exactly”), include that as a separate mention for that speaker.
 """
 
 USER_TEMPLATE = """# METADATA

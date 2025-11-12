@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json, re, argparse, csv
+import json, argparse, csv
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional, Set
 from .llm_helper import init_client, chat_json
@@ -9,8 +9,10 @@ from .llm_helper import init_client, chat_json
 SYSTEM_PROMPT = """You are an evaluation analyst. Return ONLY valid JSON matching the schema and rules.
 
 GOAL
-- For a SINGLE idea, induce sensible evaluation DIMENSIONS from the discussion and assess each with a brief rationale. 
+- For a SINGLE idea, induce sensible evaluation DIMENSIONS from the discussion and assess each with a brief rationale.
 - Provide both paraphrased key phrases and verbatim quotes (with timestamps/speakers) as evidence.
+- Only consider content clearly about the IDEA; ignore other ideas even if they occur in the same time window.
+- When possible, REUSE any previously found criteria listed in the prompt; also ADD new criteria if the evidence supports them. Output must still match the schema.
 
 DIMENSIONS
 - Do NOT assume a predefined list. Name dimensions concisely in snake_case.
@@ -32,7 +34,7 @@ OUTPUT JSON SCHEMA (no extra keys, no comments):
       "rationale": "...",
       "score": 3,
       "quotes": [
-        {"quote": "...", "start": 0.0, "end": 0.0, "speaker": "SPEAKER_00", "chunk_id": "..."}
+        {"quote": "...", "start": 0.0, "end": 0.0, "speaker": "SPEAKER_00", "segment_id": "..."}
       ],
       "paraphrases": ["short phrase", "..."]
     }
@@ -43,6 +45,9 @@ OUTPUT JSON SCHEMA (no extra keys, no comments):
 USER_TEMPLATE = """# IDEA
 {idea}
 
+# PREVIOUS_DIMENSIONS (reuse if relevant; also add new)
+{prev_dims_block}
+
 # TURNS (use ONLY these; verbatim quotes must be exact substrings)
 {turns_block}
 """
@@ -50,72 +55,87 @@ USER_TEMPLATE = """# IDEA
 def _render_turns_block(spans: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for t in spans or []:
-        if t.get("type") and t["type"] != "speech":
-            continue
         s = float(t.get("start", 0.0))
         e = float(t.get("end", s))
         spk = t.get("speaker", "S?")
         txt = (t.get("text") or "").strip().replace("\n", " ")
-        cid = t.get("chunk_id") or t.get("cid") or t.get("segment_id") or "NA"
+        cid = t.get("segment_id") or "NA"
         lines.append(f"[{s:.3f}-{e:.3f}] {spk} (chunk={cid}): {txt}")
     return "\n".join(lines)
 
+def _intervals_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return not (a1 <= b0 or a0 >= b1)
 
-def _clip_spans_to_window(spans: List[Dict[str, Any]], w0: float, w1: float) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for s in spans or []:
-        st = float(s.get("start", 0.0)); en = float(s.get("end", st))
-        if en < w0 or st > w1:
+def _build_other_ideas_masks(
+    ideas_doc: Dict[str, Any],
+    transcript_by_id: Dict[str, Dict[str, Any]],
+    current_idea_index: int
+) -> List[Tuple[float, float]]:
+    masks: List[Tuple[float, float]] = []
+    ideas = ideas_doc.get("ideas", []) or []
+    for j, other in enumerate(ideas):
+        if j == current_idea_index:
             continue
-        out.append({**s, "start": max(st, w0), "end": min(en, w1)})
-    return out
-
-
-def _build_turns_from_chunks(idea: Dict[str, Any], chunk_by_id: Dict[str, Any]) -> str:
-    lines: List[str] = []
-    for win in idea.get("windows", []) or []:
-        if len(win) < 3:
-            continue
-        w0, w1, cid = float(win[0]), float(win[1]), str(win[2])
-        ch = chunk_by_id.get(cid)
-        if not ch:
-            continue
-        spans = [s for s in ch.get("spans", []) if s.get("type") == "speech"]
-        spans = _clip_spans_to_window(spans, w0, w1)
-        block = _render_turns_block(spans)
-        if block:
-            lines.append(block)
-    return "\n".join(lines)
-
-
-def _build_turns_from_transcript(idea: Dict[str, Any], transcript: List[Dict[str, Any]]) -> str:
-    lines: List[str] = []
-    for win in idea.get("windows", []) or []:
-        if len(win) < 2:
-            continue
-        w0, w1 = float(win[0]), float(win[1])
-        spans: List[Dict[str, Any]] = []
-        for t in transcript or []:
-            if t.get("type") and t["type"] != "speech":
+        for m in (other.get("mentions") or []):
+            segid = m.get("segment_id")
+            if not segid:
                 continue
-            s = float(t.get("start", 0.0)); e = float(t.get("end", s))
-            if e < w0 or s > w1:
+            seg = transcript_by_id.get(segid)
+            if not seg:
                 continue
-            spans.append({
-                "start": max(s, w0), "end": min(e, w1),
-                "speaker": t.get("speaker", "S?"),
-                "text": (t.get("text") or "").strip(),
-                "chunk_id": t.get("segment_id") or "T"
-            })
-        block = _render_turns_block(spans)
-        if block:
-            lines.append(block)
-    return "\n".join(lines)
+            s = float(seg.get("start", 0.0))
+            e = float(seg.get("end", s))
+            if e > s:
+                masks.append((s, e))
+    return masks
 
+def _build_turns_from_mentions_transcript_exclusive(
+    idea: Dict[str, Any],
+    ideas_doc: Dict[str, Any],
+    transcript: List[Dict[str, Any]],
+    idea_index: int
+) -> str:
+    
+    # Index transcript by segment_id for O(1) lookups
+    transcript_by_id: Dict[str, Dict[str, Any]] = {
+        t.get("segment_id"): t for t in (transcript or []) if t.get("type") == "speech"
+    }
+
+    # Build masks from other ideas' mentions
+    other_masks = _build_other_ideas_masks(ideas_doc, transcript_by_id, idea_index)
+
+    spans: List[Dict[str, Any]] = []
+    for m in (idea.get("mentions") or []):
+        segid = m.get("segment_id")
+        if not segid:
+            continue
+        seg = transcript_by_id.get(segid)
+        if not seg:
+            continue
+        s = float(seg.get("start", 0.0))
+        e = float(seg.get("end", s))
+        # Exclusive: skip this segment if it overlaps any other-idea mask
+        overlapped = False
+        for (o0, o1) in other_masks:
+            if _intervals_overlap(s, e, o0, o1):
+                overlapped = True
+                break
+        if overlapped:
+            continue
+        spans.append({
+            "start": s,
+            "end": e,
+            "speaker": seg.get("speaker", "S?"),
+            "text": (seg.get("text") or "").strip(),
+            "segment_id": seg.get("segment_id") or "T"
+        })
+
+    return _render_turns_block(spans)
 
 def _normalize_result(result: Dict[str, Any]) -> Dict[str, Any]:
     dims: List[Dict[str, Any]] = []
     for d in (result.get("dimensions") or []):
+        # quotes
         qlist: List[Dict[str, Any]] = []
         for e in (d.get("quotes") or []):
             q = (e.get("quote") or "").strip()
@@ -126,8 +146,9 @@ def _normalize_result(result: Dict[str, Any]) -> Dict[str, Any]:
                 "start": float(e.get("start", 0.0)),
                 "end": float(e.get("end", 0.0)),
                 "speaker": e.get("speaker", ""),
-                "chunk_id": e.get("chunk_id", "")
+                "segment_id": e.get("segment_id", "")
             })
+        # score
         sc = d.get("score")
         try:
             sc = int(sc) if sc is not None else None
@@ -144,7 +165,6 @@ def _normalize_result(result: Dict[str, Any]) -> Dict[str, Any]:
         })
     return {"idea": result.get("idea", ""), "dimensions": dims}
 
-
 def _aggregate_csv_rows(ideas: List[Dict[str, Any]]) -> List[List[Any]]:
     names: List[str] = []
     seen: Set[str] = set()
@@ -160,13 +180,10 @@ def _aggregate_csv_rows(ideas: List[Dict[str, Any]]) -> List[List[Any]]:
         rows.append([it.get("idea", "")] + [scores.get(n) for n in names])
     return rows
 
-
 def main():
-    ap = argparse.ArgumentParser(description="Extract evaluation dimensions per idea (quotes + paraphrases)")
+    ap = argparse.ArgumentParser(description="Extract evaluation dimensions per idea (mentions-only, exclusive, chained criteria)")
     ap.add_argument("--meeting-id", required=True, help="e.g., S16")
-    ap.add_argument("--model", default="gptnano", help="LLM: gptnano | gpt3.5 | gptfull (aliases supported)")
-    ap.add_argument("--context", choices=["chunks", "transcript"], required=True)
-    ap.add_argument("--per-idea-dir", action="store_true", help="also write per-idea JSON files")
+    ap.add_argument("--model", default="gptfull", help="LLM: gptnano | gpt3.5 | gptfull (aliases supported)")
     ap.add_argument("--write-csv", action="store_true", help="emit a wide CSV of scores across discovered dimensions")
     args = ap.parse_args()
 
@@ -178,48 +195,47 @@ def main():
     if not ideas_path.exists():
         raise SystemExit(f"ideas file not found: {ideas_path}")
 
-    if args.context == "chunks":
-        context_path = base_dir / f"chunks_{args.model}.json"
-        if not context_path.exists():
-            raise SystemExit(f"chunks file not found: {context_path}")
-    else:
-        context_path = base_dir / f"transcript_final.json"
-        if not context_path.exists():
-            raise SystemExit(f"transcript file not found: {context_path}")
+    transcript_path = base_dir / "transcript_final.json"
+    if not transcript_path.exists():
+        raise SystemExit(f"transcript file not found: {transcript_path}")
 
+    # Output paths
     out_json = ctx_out / f"eval_criteria_{args.model}.json"
     per_idea_dir = ctx_out / f"eval_by_idea_{args.model}"
+    per_idea_dir.mkdir(parents=True, exist_ok=True) 
 
+    # Load inputs
     ideas_doc = json.loads(ideas_path.read_text(encoding="utf-8"))
-
-    if args.context == "chunks":
-        ctx = json.loads(context_path.read_text(encoding="utf-8"))
-        if isinstance(ctx, dict) and "chunks" in ctx:
-            ctx = ctx["chunks"]
-        chunk_by_id: Dict[str, Any] = {}
-        for ch in ctx or []:
-            cid = ch.get("chunk_id") or ch.get("id")
-            if cid:
-                chunk_by_id[str(cid)] = ch
-    else:
-        transcript = json.loads(context_path.read_text(encoding="utf-8"))
-        if isinstance(transcript, dict) and "segments" in transcript:
-            transcript = transcript["segments"]
+    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    if isinstance(transcript, dict) and "segments" in transcript:
+        transcript = transcript["segments"]
 
     client = init_client()
 
-    combined_items: List[Dict[str, Any]] = []
-    if args.per_idea_dir:
-        per_idea_dir.mkdir(parents=True, exist_ok=True)
+    running_criteria: List[str] = []
+    running_criteria_set: Set[str] = set()
 
-    for idea in ideas_doc.get("ideas", []) or []:
-        if args.context == "chunks":
-            turns_block = _build_turns_from_chunks(idea, chunk_by_id)
-        else:
-            turns_block = _build_turns_from_transcript(idea, transcript)
+    combined_items: List[Dict[str, Any]] = []
+
+    # Iterate ideas in the given order
+    for idx, idea in enumerate(ideas_doc.get("ideas", []) or []):
+        # Build mentions-only, exclusive turns from transcript
+        turns_block = _build_turns_from_mentions_transcript_exclusive(
+            idea=idea,
+            ideas_doc=ideas_doc,
+            transcript=transcript,
+            idea_index=idx
+        )
+
+        # If nothing to show (e.g., fully overlapped), skip to avoid random outputs
+        if not turns_block.strip():
+            continue
+
+        prev_dims_block = "\n".join(running_criteria) if running_criteria else "(none)"
 
         user_prompt = USER_TEMPLATE.format(
             idea=idea.get("idea", ""),
+            prev_dims_block=prev_dims_block,
             turns_block=turns_block,
         )
 
@@ -234,30 +250,38 @@ def main():
 
         if not isinstance(resp, dict):
             continue
+
         norm = _normalize_result(resp)
         combined_items.append(norm)
 
-        if args.per_idea_dir:
-            fname = (idea.get("idea", "idea").strip() or "idea").lower()
-            fname = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in fname)[:80]
-            (per_idea_dir / f"{fname}.json").write_text(
-                json.dumps({
-                    "metadata": {"meeting_id": args.meeting_id, "model": args.model, "context": args.context},
-                    "idea": norm.get("idea", ""),
-                    "dimensions": norm.get("dimensions", []),
-                }, indent=2, ensure_ascii=False),
-                encoding="utf-8"
-            )
+        fname = (idea.get("idea", "idea").strip() or "idea").lower()
+        fname = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in fname)[:80]
+        (per_idea_dir / f"{fname}.json").write_text(
+            json.dumps({
+                "metadata": {"meeting_id": args.meeting_id, "model": args.model, "context": "transcript_mentions_exclusive"},
+                "idea": norm.get("idea", ""),
+                "dimensions": norm.get("dimensions", []),
+            }, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
 
+        # Update running criteria (order-preserving)
+        for d in norm.get("dimensions", []) or []:
+            n = (d.get("name") or "").strip()
+            if n and n not in running_criteria_set:
+                running_criteria.append(n)
+                running_criteria_set.add(n)
+
+    # --- Combined meeting-level JSON ---
     out_json.write_text(
         json.dumps({
-            "metadata": {"meeting_id": args.meeting_id, "model": args.model, "context": args.context},
+            "metadata": {"meeting_id": args.meeting_id, "model": args.model, "context": "transcript_mentions_exclusive"},
             "ideas": combined_items
         }, indent=2, ensure_ascii=False),
         encoding="utf-8"
     )
 
-    if args.write_csv:
+    if getattr(args, "write_csv", False):
         rows = _aggregate_csv_rows(combined_items)
         csv_path = out_json.with_name(out_json.stem + "_scores.csv")
         with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -265,6 +289,7 @@ def main():
             writer.writerows(rows)
         print(f"Wrote matrix CSV: {csv_path}")
 
+    print("[criteria_json]", json.dumps(running_criteria, ensure_ascii=False))
     print(f"[done] {out_json}")
 
 
