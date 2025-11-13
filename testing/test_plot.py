@@ -15,9 +15,6 @@ IDEA_PATH = Path(args.ideas).expanduser().resolve()
 OUT_DIR = SEG_PATH.parent  # save in same directory
 MEETING_ID = SEG_PATH.parent.name
 
-# -----------------------------
-# Utility helpers
-# -----------------------------
 def fmt_hms(sec):
     if sec is None or math.isnan(sec): return "0:00"
     sec = int(round(sec)); m, s = divmod(sec, 60); h, m = divmod(m, 60)
