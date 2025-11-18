@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#reflect_ideas.py
 import json
 import argparse
 from typing import Dict, Any
@@ -46,6 +46,7 @@ Return ONLY valid JSON with this exact schema (no extra keys, no comments):
           "speaker": "SPEAKER_00",
           "start": 857.686,
           "end": 865.482,
+          "text": "So if we're thinking about like, what we wanna do if we're designing for a system...",
           "supporting_quote": "So if we're thinking about like, what we wanna do if we're designing for a system..."
         }
       ]
@@ -60,16 +61,16 @@ Return ONLY valid JSON with this exact schema (no extra keys, no comments):
   ]
 }
 
-DETAILED INSTRUCTIONS
-
 FILTERING AND MERGING IDEAS
 - Treat idea_local_id as a unique handle for each raw idea.
 - Two ideas belong to the same consolidated idea if, in your judgment, they describe essentially the same proposal or design, even if wording differs.
+- Do NOT merge ideas that describe distinct features, design directions, or implementation variants.
 - If a candidate is clearly not an idea related to the meeting topic, place it under discarded_ideas with a clear reason.
 
 CANONICAL IDEA
 - Canonical_idea should be a clear, concise phrase (5-20 words).
 - Describe the central proposal in a general way that would still make sense outside this specific meeting.
+- Order consolidated ideas by the earliest timestamp among their mentions.
 
 SOURCE FIELDS
 - source_idea_ids: ALL idea_local_id values that you merged into this consolidated idea.
@@ -91,6 +92,7 @@ MENTIONS AND SUPPORTING QUOTES
 
 DISCARDED IDEAS
 - source_idea_ids and source_idea_texts should list all the ideas that you are discarding in that entry.
+- Discard only if the idea is clearly off-topic, non-actionable, purely conversational, or not a solution/design proposal.
 - reason should be specific and human-readable.
 
 GENERAL RULES
@@ -98,7 +100,6 @@ GENERAL RULES
 - Do NOT invent new segment_id, chunk_id, or timestamps.
 - Do NOT fabricate mentions or quotes; all must be grounded in the provided text.
 - If there are no valid ideas, return "ideas": [] and put everything in discarded_ideas.
-- Output STRICT JSON only, matching exactly the schema above.
 """
 
 def main() -> None:

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#extract_ideas_raw.py
 import json
 import argparse
 from typing import Dict, Any, List
@@ -8,7 +8,6 @@ from .utils.common import load_metadata, get_meeting_base_dir
 SYSTEM_PROMPT = """
 You are an idea extraction tool.
 Return valid JSON with this schema (no extra keys, no comments):
-
 {
   "chunk_id": "chunk identifier",
   "ideas": [
@@ -17,7 +16,7 @@ Return valid JSON with this schema (no extra keys, no comments):
       "idea_text": "short description of the idea",
       "mentions": [
         {
-          "segment_id": "segment id copied from a TURN line"
+          "segment_id": "segment id"
         }
       ]
     }
@@ -25,14 +24,12 @@ Return valid JSON with this schema (no extra keys, no comments):
 }
 
 DEFINITIONS
-- Extract proposals, solutions, suggestions, or actionable concepts that relate to the meeting topic.
-- Skip purely procedural comments (scheduling, breaks) and complete off-topic tangents.
-- Be faithful to the source.
-- This chunk is only part of the meeting. Extract ideas based ONLY on the turns in this chunk.
-- Include things that might be ideas even if you're uncertain - it's better to be inclusive.
+- An idea must propose a specific solution, plan, feature, or design direction that contributes to the meeting topic.
+- Extract ideas based ONLY on the turns in this chunk.
+- Include ideas that you are uncertain about.
 
-RULES FOR TURNS AND MENTIONS
-- For each mention, copy the segment_id EXACTLY from the TURN lines.
+RULES FOR MENTIONS
+- For each mention of the local id, copy the segment_id EXACTLY from the TURN lines that talk about the idea and things related to that idea.
 - A single idea can have multiple mentions (different segment_id).
 - Do NOT invent new segment_id values.
 - Do NOT reference text that is not present in the provided TURNS.
@@ -40,17 +37,15 @@ RULES FOR TURNS AND MENTIONS
 
 RULES FOR IDEA TEXT
 - idea_text should be a clear, concise paraphrase of the idea in 5 to 15 words.
-- Do NOT include speaker names or timestamps in idea_text.
+- idea_text should stay close to the speaker's actual meaning; do not add embellishments or speculative details.
 - Do NOT invent ideas that are not supported by the TURNS.
 
 RULES FOR IDS
 - chunk_id in the output MUST match the provided chunk_id.
-- idea_local_id must be unique within this chunk. You may use simple labels like "I1", "I2", "I3", etc.
 
 OTHER RULES
-- Use ONLY the provided TURNS and METADATA.
+- Use ONLY the information provided in the TURNS and METADATA.
 - Stay focused on the meeting TOPIC; if no valid ideas appear in this chunk, return "ideas": [].
-- Output STRICT JSON only, with the exact schema above.
 """
 
 USER_TEMPLATE = """# METADATA
