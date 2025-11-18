@@ -41,7 +41,7 @@ else
   python3 -m ingest_asr_diar.diarization --meeting-id "${MEETING_ID}"
 fi
 
-echo "[3/3] Transcription + ASR↔Diar fusion"
+echo "[3/3] Transcription + ASR-Diar fusion"
 python3 -m ingest_asr_diar.transcribe --meeting-id "${MEETING_ID}"
 
 echo

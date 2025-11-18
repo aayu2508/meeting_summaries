@@ -1,12 +1,11 @@
 # llm_helper.py
-import os, json, re, time, hashlib
+import os, json, re, time
 from typing import Any, Dict, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Incase odd model naming is used, map to canonical model ids
 _MODEL_ALIASES = {
     "gpt3.5": "gpt-3.5-turbo",
     "gpt-3.5": "gpt-3.5-turbo",
@@ -60,7 +59,6 @@ def chat_json(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    max_tokens: int = 2048,
     max_retries: int = 3,
     backoff: float = 0.6,
     reasoning_effort: Optional[str] = None,   # e.g., "minimal"
@@ -78,11 +76,6 @@ def chat_json(
             {"role": "user", "content": user_prompt},
         ],
     }
-
-    if _uses_max_completion_tokens(model_id):
-        base_payload["max_completion_tokens"] = max_tokens
-    else:
-        base_payload["max_tokens"] = max_tokens
 
     json_mode_payload = dict(base_payload)
     if _supports_json_mode(model_id):
@@ -110,12 +103,7 @@ def chat_json(
                         {"role": "user", "content": f"Fix to valid JSON only:\n\n{raw}"},
                     ],
                 }
-
-                if _uses_max_completion_tokens(model_id):
-                    repair_payload["max_completion_tokens"] = max_tokens
-                else:
-                    repair_payload["max_tokens"] = max_tokens
-
+                
                 if _supports_json_mode(model_id):
                     repair_payload["response_format"] = {"type": "json_object"}
                     if reasoning_effort is not None:
@@ -131,13 +119,3 @@ def chat_json(
             backoff *= 2
 
     return {"_error": str(last_err) if last_err else "unknown_error"}
-
-def norm_key(s: str) -> str:
-    base = " ".join((s or "").lower().strip().split())
-    return hashlib.md5(base.encode("utf-8")).hexdigest()
-
-def canonical_idea_text(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"[-_]", " ", s)
-    return s

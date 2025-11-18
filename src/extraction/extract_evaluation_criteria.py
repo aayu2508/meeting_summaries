@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+# extract_evaluation_criteria.py
 from __future__ import annotations
 
 import json, argparse, csv
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional, Set
-from .llm_helper import init_client, chat_json
+from utils.llm_client import init_client, chat_json
 
 SYSTEM_PROMPT = """You are an evaluation analyst. Return ONLY valid JSON matching the schema and rules.
 

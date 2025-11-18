@@ -5,7 +5,6 @@ from typing import List, Dict, Any
 
 PROFILES = {
     "gptnano": {"target_tokens": 900,  "hard_max": 1200, "overlap": 0.20},
-    "gpt35":   {"target_tokens": 900,  "hard_max": 1200, "overlap": 0.25},
     "gptfull": {"target_tokens": 3000, "hard_max": 3600, "overlap": 0.12},
 }
 
@@ -81,14 +80,14 @@ def chunk_by_turns(turns: List[Dict[str, Any]], *, target_tokens: int, hard_max:
 def main():
     ap = argparse.ArgumentParser(description="Minimal chunker for idea-first pipeline")
     ap.add_argument("--meeting-id", type=str, required=True, help="Meeting ID (e.g., BAC)")
-    ap.add_argument("--profile", type=str, default="gptnano", help="gptnano | gpt35 | gptfull")
+    ap.add_argument("--profile", type=str, default="gptnano", help="gptnano | gptfull")
     args = ap.parse_args()
 
     profile = args.profile.lower()
     cfg = PROFILES[profile]
 
     root = Path("data/outputs") / args.meeting_id
-    in_path  = root / "transcript_final.json"
+    in_path  = root / "transcript.json"
     out_path = root / f"chunks_{profile}.json"
 
     turns = json.loads(in_path.read_text(encoding="utf-8"))

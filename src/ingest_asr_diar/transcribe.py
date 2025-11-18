@@ -245,7 +245,7 @@ def main():
 
     # Canonical transcript: choose RAW by default (swap to merged if preferred)
     out_json = out_dir / "transcript.json"
-    out_json.write_text(json.dumps(timeline_raw, ensure_ascii=False, indent=2))
+    out_json.write_text(json.dumps(timeline_merged, ensure_ascii=False, indent=2))
     print(f"[done] canonical: {out_json} (RAW-aligned)")
 
 if __name__ == "__main__":

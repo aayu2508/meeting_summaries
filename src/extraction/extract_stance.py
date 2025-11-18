@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, argparse, re
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional, Set
-from .llm_helper import init_client, chat_json
+from utils.llm_client import init_client, chat_json
 
 
 STANCE_SYSTEM = """Label each SPEAKER's stance toward the IDEA.

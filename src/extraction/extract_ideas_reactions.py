@@ -2,7 +2,7 @@
 import json, argparse, re
 from pathlib import Path
 from typing import Dict, Any, List
-from .llm_helper import init_client, chat_json
+from utils.llm_client import init_client, chat_json
 
 ALLOWED_LABELS = {
     "felt_positive","felt_negative","high_intensity",

@@ -4,7 +4,7 @@ import json, argparse
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, DefaultDict
 from collections import defaultdict
-from .llm_helper import init_client, chat_json, norm_key
+from utils.llm_client import init_client, chat_json
 
 
 CATEGORIES: List[Tuple[str, str]] = [

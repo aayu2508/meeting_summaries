@@ -2,7 +2,7 @@
 import json, re, argparse, difflib, hashlib
 from pathlib import Path
 from typing import Dict, Any, List
-from .llm_helper import init_client, chat_json
+from .utils.llm_helper import init_client, chat_json
 
 SYSTEM_PROMPT = """You are an information extractor. Return ONLY valid JSON that matches the schema below.
 NO extra keys, NO comments, NO markdown, NO prose outside JSON.

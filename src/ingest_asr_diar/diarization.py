@@ -10,8 +10,8 @@ from pyannote.audio.pipelines.utils.hook import ProgressHook
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
-MERGE_GAP_S = 3        # merge same-speaker pauses shorter than this
-OVERLAP_JOIN_S = 0.05    # also merge tiny overlaps (<= 50 ms)
+MERGE_GAP_S = 0.5      
+OVERLAP_JOIN_S = 0.02
 
 def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -29,9 +29,8 @@ def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     for nxt in turns[1:]:
         same = nxt["speaker"] == cur["speaker"]
-        gap = float(nxt["start"]) - float(cur["end"])  # negative => overlap
+        gap = float(nxt["start"]) - float(cur["end"])  
 
-        # Inclusive bounds to avoid float precision edge cases.
         if same and (-OVERLAP_JOIN_S <= gap <= MERGE_GAP_S):
             cur["end"] = max(cur["end"], nxt["end"])
         else:

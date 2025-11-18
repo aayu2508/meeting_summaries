@@ -2,7 +2,9 @@
 import json, argparse
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from .llm_helper import init_client, chat_json, norm_key, canonical_idea_text
+from .utils.llm_client import init_client, chat_json
+from .utils.common import load_metadata, get_meeting_base_dir
+from .utils.common import norm_key, canonical_idea_text
 
 SYSTEM_PROMPT = """You extract MAJOR IDEAS from meeting chunks and provide mentions with timestamps and speaker labels.
 Return ONLY this JSON:
