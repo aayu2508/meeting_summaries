@@ -1,21 +1,29 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
+#!/usr/bin/env python3
 import argparse
-import os
+from pathlib import Path
 
-ap = argparse.ArgumentParser(description="Plot idea and criteria table from meeting CSV")
+import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
+import numpy as np
+import pandas as pd
+
+ap = argparse.ArgumentParser(description="Plot idea - criteria table from meeting CSV")
 ap.add_argument("--meeting-id", required=True, help="e.g., BAC")
-ap.add_argument("--model", default="gptfull", help="model name used in the CSV filename (default: gptfull)")
+ap.add_argument(
+    "--model",
+    default="gptfull",
+    help="model name used in the CSV filename (default: gptfull)",
+)
 args = ap.parse_args()
 
-base = os.path.join(
-    "data", "outputs", args.meeting_id, "context_outputs",
-)
-CSV = os.path.join(
-    base,
-    f"eval_criteria_{args.model}_scores.csv"
-)
+base_dir = Path("data") / "outputs" / args.meeting_id
+ctx_dir = base_dir / "context_outputs"
+plots_dir = base_dir / "plots"
+plots_dir.mkdir(parents=True, exist_ok=True)
+
+csv_path = ctx_dir / f"eval_criteria_{args.model}_matrix.csv"
+if not csv_path.exists():
+    raise SystemExit(f"CSV not found: {csv_path}")
 
 def humanize_snake(s: str) -> str:
     s = s.replace("_", " ").strip()
@@ -29,95 +37,135 @@ def wrap_by_words(text: str, words_per_line: int) -> str:
         return ""
     lines = []
     for i in range(0, len(words), words_per_line):
-        lines.append(" ".join(words[i:i+words_per_line]))
+        lines.append(" ".join(words[i : i + words_per_line]))
     return "\n".join(lines)
 
-# ---------- Load & clean ----------
-df = pd.read_csv(CSV).fillna("")
-idea_col_raw = df.columns[0]
-score_cols_raw = df.columns[1:]
+df_raw = pd.read_csv(csv_path).fillna("")
 
-# Cast scores to int strings or blank
-for c in score_cols_raw:
-    s = pd.to_numeric(df[c], errors="coerce")
-    df[c] = s.apply(lambda v: "" if pd.isna(v) else str(int(v)))
+# Drop any Unnamed index columns
+cols = [c for c in df_raw.columns if not str(c).startswith("Unnamed")]
+if not cols:
+    raise SystemExit("No usable columns in CSV")
 
-# ---------- Build headers with your wrapping rule ----------
-idea_header = "Idea"
-criteria_headers_wrapped = [
-    "\n".join(humanize_snake(c).split()) for c in score_cols_raw
-]
-df.columns = [idea_header] + [humanize_snake(c) for c in score_cols_raw]
+# Find idea TEXT column: prefer column literally named "idea"
+idea_col = None
+for c in cols:
+    if str(c).strip().lower() == "idea":
+        idea_col = c
+        break
+if idea_col is None:
+    # Fallback to the first column if "idea" not found
+    idea_col = cols[0]
 
-# ---------- Wrap cell content ----------
-df[idea_header] = df[idea_header].apply(lambda x: wrap_by_words(str(x), 3))
+# Meta columns we NEVER want in the matrix
+meta_names = {"idea", "idea id", "idea_id", "id"}
+meta_cols = {idea_col}
+for c in cols:
+    if str(c).strip().lower() in meta_names:
+        meta_cols.add(c)
 
-# ---------- Compute layout ----------
+# Criteria columns = everything except meta columns
+criteria_cols = [c for c in cols if c not in meta_cols]
+if not criteria_cols:
+    raise SystemExit("No criteria columns found after removing meta columns")
+
+# Wrap idea text for row labels (from idea_col)
+idea_labels = df_raw[idea_col].apply(lambda x: wrap_by_words(str(x), 3)).tolist()
+
+# Matrix contains only criteria columns
+df = df_raw[criteria_cols].copy()
+
+for c in criteria_cols:
+    def _norm(v):
+        s = str(v).strip()
+        if not s or s.lower() in ("nan", "none"):
+            return ""
+        return "1"
+    df[c] = df[c].apply(_norm)
+
+# Human readable dimension headers
+criteria_headers_human = [humanize_snake(c) for c in criteria_cols]
+criteria_headers_wrapped = ["\n".join(h.split()) for h in criteria_headers_human]
+
 n_rows, n_cols = df.shape
 
-# Column widths (slightly wider Idea col; enough for criteria too)
-col_units = [1.7] + [0.8]*(n_cols-1)
+# Equal width for all criteria columns
+col_units = [1.0] * n_cols
 col_sum = float(sum(col_units))
-col_widths = [u/col_sum for u in col_units]
+col_widths = [u / col_sum for u in col_units]
 
-# Row height based on max wrapped lines
-row_line_counts = []
-for _, row in df.iterrows():
-    max_lines = 1
-    for val in row:
-        txt = str(val)
-        max_lines = max(max_lines, (txt.count("\n")+1) if txt else 1)
-    row_line_counts.append(max_lines)
+# Estimate row height from wrapped idea labels
+row_line_counts = [lbl.count("\n") + 1 for lbl in idea_labels]
 avg_lines = max(1, np.mean(row_line_counts))
 
-# Figure size heuristic
-fig_w = max(12, 1.2 * n_cols + 2)
-fig_h = max(6, 0.38 * n_rows * (1 + 0.25 * (avg_lines - 1)))
+fig_w = max(10, 0.8 * n_cols + 4)
+fig_h = max(6, 0.35 * n_rows * (1 + 0.25 * (avg_lines - 1)))
 
 fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 ax.axis("off")
 
-wrapped_headers = [idea_header] + criteria_headers_wrapped
-
+# cellText: ONLY criteria matrix
+# rowLabels: idea text (not part of matrix; no "Idea id" anywhere)
 table = ax.table(
     cellText=df.values,
-    colLabels=wrapped_headers,
+    rowLabels=idea_labels,
+    colLabels=criteria_headers_wrapped,
     colWidths=col_widths,
     cellLoc="center",
+    rowLoc="center",
     loc="center",
-    bbox=[0, 0, 1, 1]
+    bbox=[0, 0, 1, 1],
 )
 
-# Styling
 table.auto_set_font_size(False)
-table.set_fontsize(10)
+table.set_fontsize(9)
 
-# Bold header + a bit taller
+# Header formatting
 for (r, c), cell in table.get_celld().items():
-    if r == 0:
+    if r == 0:  # header row (only criteria headers)
         cell.set_text_props(weight="bold")
-        cell.set_height(0.065)
+        cell.set_height(0.06)
 
-# Left-align idea column; keep others centered
+# Ensure row labels show idea text, left aligned, never colored
 for r in range(1, n_rows + 1):
-    cell = table[(r, 0)]
-    cell._loc = 'left'
-    cell.get_text().set_ha('left')
+    if (r, -1) in table.get_celld():
+        label_cell = table[(r, -1)]
+        label_cell.get_text().set_text(idea_labels[r - 1])
+        label_cell._loc = "left"
+        label_cell.get_text().set_ha("left")
+        label_cell.set_facecolor("white")
 
-# Dynamic row heights
-base_h = 0.05
+# Dynamic row heights (header is row 0)
+base_h = 0.045
 for r in range(1, n_rows + 1):
-    max_lines = 1
-    for c in range(n_cols):
+    label_lines = idea_labels[r - 1].count("\n") + 1
+    max_lines = label_lines
+    for c in range(0, n_cols):
         txt = table[(r, c)].get_text().get_text()
-        max_lines = max(max_lines, (txt.count("\n")+1) if txt else 1)
-    for c in range(n_cols):
-        table[(r, c)].set_height(base_h * (1 + 0.30 * (max_lines - 1)))
+        max_lines = max(max_lines, (txt.count("\n") + 1) if txt else 1)
+    for c in [-1] + list(range(0, n_cols)):
+        if (r, c) in table.get_celld():
+            table[(r, c)].set_height(base_h * (1 + 0.30 * (max_lines - 1)))
 
-# Thin grid for readability
+# Thin grid all around
 for cell in table.get_celld().values():
-    cell.set_linewidth(0.6)
+    cell.set_linewidth(0.5)
+
+green = mcolors.to_rgba("#c6efce")  # discussed
+red   = mcolors.to_rgba("#ffc7ce")  # not discussed
+
+# Data rows start at 1, data columns are 0..n_cols-1 (pure criteria)
+for r in range(1, n_rows + 1):
+    for c in range(0, n_cols):
+        txt = table[(r, c)].get_text().get_text().strip()
+        if txt == "1":
+            table[(r, c)].set_facecolor(green)
+        else:
+            table[(r, c)].set_facecolor(red)
 
 plt.tight_layout()
-path = base + f"/evaluation_table_{args.meeting_id}_{args.model}.png"
-plt.savefig(path, dpi=300, bbox_inches="tight")
+
+out_path = plots_dir / f"evaluation_table_{args.meeting_id}_{args.model}.png"
+plt.savefig(out_path, dpi=300, bbox_inches="tight")
+plt.close(fig)
+print(f"[ok] saved evaluation table → {out_path}")

@@ -1,240 +1,267 @@
-# extract_evaluation_criteria.py
+#extract_evaluation_criteria.py
 from __future__ import annotations
 
 import json, argparse, csv
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional, Set
-from utils.llm_client import init_client, chat_json
+from typing import Dict, Any, List, Set
 
-SYSTEM_PROMPT = """You are an evaluation analyst. Return ONLY valid JSON matching the schema and rules.
+from .utils.llm_client import init_client, chat_json
+from .utils.common import get_meeting_base_dir, load_metadata
 
-GOAL
-- For a SINGLE idea, induce sensible evaluation DIMENSIONS from the discussion and assess each with a brief rationale.
-- Provide both paraphrased key phrases and verbatim quotes (with timestamps/speakers) as evidence.
-- Only consider content clearly about the IDEA; ignore other ideas even if they occur in the same time window.
-- When possible, REUSE any previously found criteria listed in the prompt; also ADD new criteria if the evidence supports them. Output must still match the schema.
 
-DIMENSIONS
-- Do NOT assume a predefined list. Name dimensions concisely in snake_case.
-- Prefer generalizable names (e.g., feasibility, cost, risk, user_adoption, regulatory, maintainability, sustainability, partner_dependency, etc.).
-- 3-8 dimensions is typical; include more only if clearly justified by the text.
+SYSTEM_PROMPT = """
+You are an evaluation-dimension extractor for a SINGLE IDEA in a meeting at a time.
 
-EVIDENCE RULES
-- Use ONLY the provided TURNS. Do NOT invent content.
-- Include 1-3 VERBATIM quotes per dimension (exact substrings) with start, end, speaker.
-- Include 1-3 PARAPHRASED phrases (<= 12 words each) that capture the gist.
-- Keep rationales concise (<= 30 words) and grounded in the evidence.
+WHAT YOU RECEIVE
+- A single IDEA (canonical_idea and optional source_idea_texts).
+- A list of PREVIOUS_DIMENSIONS but you don't need to reuse it if you don't find it being talked about in an idea.
+- A block of TURNS. Each TURN has segment_id, timestamps, speaker, and text.
+- These TURNS are ALL the segments that are about this idea or closely related context.
+
+YOUR JOB
+For THIS idea only, infer a SET of evaluation DIMENSIONS that participants actually use
+(or clearly imply) when they talk about the idea.
+
+A dimension is an abstract lens used to judge, reason or evaluate about the idea, such as:
+  - expressing a benefit or advantage,
+  - noting a drawback, risk, or difficulty,
+  - questioning practicality or scale,
+  - comparing against another approach,
+  - talking about whether people would adopt/use it.
+- If you cannot find clear evaluative content for a candidate lens, do NOT include that dimension.
+- It is acceptable to return 0 dimensions if the TURNS do not contain any real evaluation.
+- Prefer generalizable names that make sense (e.g., feasibility, cost, risk, user_adoption, regulatory, maintainability, sustainability, partner_dependency, etc.).
+
+QUOTES AND EVIDENCE
+- For each dimension:
+  - Provide a short rationale (<= 30 words) that explains why this dimension matters for this idea,
+    grounded in what people actually say.
+  - Provide 1-3 verbatim quotes as evidence.
+- Quotes MUST follow all of these rules:
+  - They must be exact substrings of the TURNS text (you may trim small fillers, but do not rewrite).
+  - They must come ONLY from the TURNS block, not from metadata or source_idea_texts.
+  - Each quote must include: quote, start, end, speaker, segment_id.
+- Do NOT invent segment_id values.
+- Do NOT treat source_idea_texts as if they were spoken quotes; they are background only.
 
 OUTPUT JSON SCHEMA (no extra keys, no comments):
 {
-  "idea": "...",
+  "idea": "short description of the idea",
   "dimensions": [
     {
       "name": "concise_snake_case_name",
-      "rationale": "...",
-      "score": 3,
+      "rationale": "why this dimension is relevant for evaluating this idea",
       "quotes": [
-        {"quote": "...", "start": 0.0, "end": 0.0, "speaker": "SPEAKER_00", "segment_id": "..."}
-      ],
-      "paraphrases": ["short phrase", "..."]
+        {
+          "quote": "...",
+          "start": 0.0,
+          "end": 0.0,
+          "speaker": "SPEAKER_00",
+          "segment_id": "..."
+        }
+      ]
     }
   ]
 }
 """
 
 USER_TEMPLATE = """# IDEA
-{idea}
+idea_id: {idea_id}
+canonical_idea: {canonical_idea}
 
-# PREVIOUS_DIMENSIONS (reuse if relevant; also add new)
+source_idea_texts:
+{source_idea_texts_block}
+
+# PREVIOUS_DIMENSIONS
+(reuse these names when appropriate; add new ones only if needed)
 {prev_dims_block}
 
-# TURNS (use ONLY these; verbatim quotes must be exact substrings)
+# TURNS
+(use ONLY these; verbatim quotes must be exact substrings of this text)
 {turns_block}
 """
 
 def _render_turns_block(spans: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for t in spans or []:
+        seg_id = t.get("segment_id") or "NA"
         s = float(t.get("start", 0.0))
         e = float(t.get("end", s))
         spk = t.get("speaker", "S?")
         txt = (t.get("text") or "").strip().replace("\n", " ")
-        cid = t.get("segment_id") or "NA"
-        lines.append(f"[{s:.3f}-{e:.3f}] {spk} (chunk={cid}): {txt}")
+        lines.append(f"[segment_id={seg_id} | {s:.3f}-{e:.3f}] {spk}: {txt}")
     return "\n".join(lines)
 
-def _intervals_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
-    return not (a1 <= b0 or a0 >= b1)
 
-def _build_other_ideas_masks(
-    ideas_doc: Dict[str, Any],
-    transcript_by_id: Dict[str, Dict[str, Any]],
-    current_idea_index: int
-) -> List[Tuple[float, float]]:
-    masks: List[Tuple[float, float]] = []
-    ideas = ideas_doc.get("ideas", []) or []
-    for j, other in enumerate(ideas):
-        if j == current_idea_index:
-            continue
-        for m in (other.get("mentions") or []):
-            segid = m.get("segment_id")
-            if not segid:
-                continue
-            seg = transcript_by_id.get(segid)
-            if not seg:
-                continue
-            s = float(seg.get("start", 0.0))
-            e = float(seg.get("end", s))
-            if e > s:
-                masks.append((s, e))
-    return masks
-
-def _build_turns_from_mentions_transcript_exclusive(
-    idea: Dict[str, Any],
-    ideas_doc: Dict[str, Any],
-    transcript: List[Dict[str, Any]],
-    idea_index: int
-) -> str:
-    
-    # Index transcript by segment_id for O(1) lookups
-    transcript_by_id: Dict[str, Dict[str, Any]] = {
-        t.get("segment_id"): t for t in (transcript or []) if t.get("type") == "speech"
-    }
-
-    # Build masks from other ideas' mentions
-    other_masks = _build_other_ideas_masks(ideas_doc, transcript_by_id, idea_index)
-
+def _build_spans_from_mentions(idea: Dict[str, Any]) -> List[Dict[str, Any]]:
     spans: List[Dict[str, Any]] = []
-    for m in (idea.get("mentions") or []):
-        segid = m.get("segment_id")
-        if not segid:
-            continue
-        seg = transcript_by_id.get(segid)
-        if not seg:
-            continue
-        s = float(seg.get("start", 0.0))
-        e = float(seg.get("end", s))
-        # Exclusive: skip this segment if it overlaps any other-idea mask
-        overlapped = False
-        for (o0, o1) in other_masks:
-            if _intervals_overlap(s, e, o0, o1):
-                overlapped = True
-                break
-        if overlapped:
-            continue
-        spans.append({
-            "start": s,
-            "end": e,
-            "speaker": seg.get("speaker", "S?"),
-            "text": (seg.get("text") or "").strip(),
-            "segment_id": seg.get("segment_id") or "T"
-        })
+    seen: Set[str] = set()
 
-    return _render_turns_block(spans)
+    for key in ("mentions", "mentions_extra"):
+        for m in (idea.get(key) or []):
+            sid = (m.get("segment_id") or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            start = float(m.get("start", 0.0))
+            end = float(m.get("end", start))
+            spans.append(
+                {
+                    "segment_id": sid,
+                    "start": start,
+                    "end": end,
+                    "speaker": m.get("speaker", "S?"),
+                    "text": (m.get("text") or "").strip(),
+                }
+            )
 
-def _normalize_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    spans.sort(key=lambda t: float(t.get("start", 0.0)))
+    return spans
+
+
+def _normalize_result(result: Dict[str, Any], canonical_idea: str) -> Dict[str, Any]:
     dims: List[Dict[str, Any]] = []
     for d in (result.get("dimensions") or []):
-        # quotes
+        name_raw = (d.get("name") or "dimension").strip()
+        name = name_raw.lower().replace(" ", "_")
+
+        rationale = (d.get("rationale") or "").strip()
+
         qlist: List[Dict[str, Any]] = []
         for e in (d.get("quotes") or []):
             q = (e.get("quote") or "").strip()
             if not q:
                 continue
-            qlist.append({
-                "quote": q,
-                "start": float(e.get("start", 0.0)),
-                "end": float(e.get("end", 0.0)),
-                "speaker": e.get("speaker", ""),
-                "segment_id": e.get("segment_id", "")
-            })
-        # score
-        sc = d.get("score")
-        try:
-            sc = int(sc) if sc is not None else None
-        except Exception:
-            sc = None
-        if sc is not None:
-            sc = max(1, min(5, sc))
-        dims.append({
-            "name": (d.get("name") or "dimension").strip().lower().replace(" ", "_"),
-            "score": sc,
-            "rationale": (d.get("rationale") or "").strip(),
-            "quotes": qlist[:3],
-            "paraphrases": [ (p or "").strip() for p in (d.get("paraphrases") or []) ][:3]
-        })
-    return {"idea": result.get("idea", ""), "dimensions": dims}
+            qlist.append(
+                {
+                    "quote": q,
+                    "start": float(e.get("start", 0.0)),
+                    "end": float(e.get("end", 0.0)),
+                    "speaker": (e.get("speaker") or "").strip(),
+                    "segment_id": (e.get("segment_id") or "").strip(),
+                }
+            )
+
+        dims.append(
+            {
+                "name": name,
+                "rationale": rationale,
+                "quotes": qlist[:3],
+            }
+        )
+
+    return {
+        "idea": canonical_idea,
+        "dimensions": dims,
+    }
+
 
 def _aggregate_csv_rows(ideas: List[Dict[str, Any]]) -> List[List[Any]]:
     names: List[str] = []
     seen: Set[str] = set()
     for it in ideas:
-        for d in it.get("dimensions", []) or []:
+        for d in (it.get("dimensions") or []):
             n = d.get("name")
             if n and n not in seen:
-                seen.add(n); names.append(n)
+                seen.add(n)
+                names.append(n)
     names.sort()
-    rows: List[List[Any]] = [["idea"] + names]
+
+    rows: List[List[Any]] = [["idea_id", "idea"] + names]
     for it in ideas:
-        scores = {d.get("name"): d.get("score") for d in it.get("dimensions", []) or []}
-        rows.append([it.get("idea", "")] + [scores.get(n) for n in names])
+        idea_id = it.get("idea_id", "")
+        idea_str = it.get("idea", "")
+        present = {d.get("name") for d in (it.get("dimensions") or [])}
+        rows.append(
+            [idea_id, idea_str] + [1 if n in present else "" for n in names]
+        )
     return rows
 
-def main():
-    ap = argparse.ArgumentParser(description="Extract evaluation dimensions per idea (mentions-only, exclusive, chained criteria)")
-    ap.add_argument("--meeting-id", required=True, help="e.g., S16")
-    ap.add_argument("--model", default="gptfull", help="LLM: gptnano | gpt3.5 | gptfull (aliases supported)")
-    ap.add_argument("--write-csv", action="store_true", help="emit a wide CSV of scores across discovered dimensions")
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Extract evaluation dimensions per idea from mentions-only JSON."
+    )
+    ap.add_argument("--meeting-id", required=True, help="e.g., BAC")
+    ap.add_argument(
+        "--ideas-json",
+        required=True,
+        help="Path (relative to context_outputs or absolute) to ideas JSON with mentions + mentions_extra.",
+    )
+    ap.add_argument(
+        "--model",
+        default="gptfull",
+        help="LLM alias for evaluation, e.g., gptfull (mapped to gpt-5).",
+    )
+    ap.add_argument(
+        "--write-csv",
+        action="store_true",
+        help="Emit a wide CSV of dimension presence across ideas.",
+    )
     args = ap.parse_args()
 
-    base_dir = Path("data/outputs") / args.meeting_id
+    base_dir = get_meeting_base_dir(args.meeting_id)
     ctx_out = base_dir / "context_outputs"
     ctx_out.mkdir(parents=True, exist_ok=True)
 
-    ideas_path = ctx_out / f"ideas_windows_{args.model}.json"
+    # Resolve ideas JSON path
+    ideas_path = Path(args.ideas_json)
+    if not ideas_path.is_absolute():
+        ideas_path = ctx_out / ideas_path
+
     if not ideas_path.exists():
         raise SystemExit(f"ideas file not found: {ideas_path}")
 
-    transcript_path = base_dir / "transcript_final.json"
-    if not transcript_path.exists():
-        raise SystemExit(f"transcript file not found: {transcript_path}")
-
-    # Output paths
-    out_json = ctx_out / f"eval_criteria_{args.model}.json"
-    per_idea_dir = ctx_out / f"eval_by_idea_{args.model}"
-    per_idea_dir.mkdir(parents=True, exist_ok=True) 
-
-    # Load inputs
     ideas_doc = json.loads(ideas_path.read_text(encoding="utf-8"))
-    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
-    if isinstance(transcript, dict) and "segments" in transcript:
-        transcript = transcript["segments"]
+    ideas_list = ideas_doc.get("ideas") or []
+
+    if not ideas_list:
+        raise SystemExit(f"No ideas found in {ideas_path}")
+
+    # Metadata: prefer ideas_doc metadata, fall back to metadata.json
+    meta: Dict[str, Any] = ideas_doc.get("metadata") or {}
+    if not meta:
+        meta = load_metadata(base_dir)
+
+    meeting_id = meta.get("meeting_id", args.meeting_id)
+    topic = meta.get("topic", "")
+    meeting_type = meta.get("meeting_type", "")
+    num_participants = meta.get("num_participants", 0)
+    duration_sec = meta.get("duration_sec", 0.0)
 
     client = init_client()
 
-    running_criteria: List[str] = []
-    running_criteria_set: Set[str] = set()
+    running_dims: List[str] = []
+    running_dims_set: Set[str] = set()
 
     combined_items: List[Dict[str, Any]] = []
 
-    # Iterate ideas in the given order
-    for idx, idea in enumerate(ideas_doc.get("ideas", []) or []):
-        # Build mentions-only, exclusive turns from transcript
-        turns_block = _build_turns_from_mentions_transcript_exclusive(
-            idea=idea,
-            ideas_doc=ideas_doc,
-            transcript=transcript,
-            idea_index=idx
-        )
+    for idea in ideas_list:
+        idea_id = idea.get("idea_id") or "NO_ID"
+        canonical_idea = (idea.get("canonical_idea") or "").strip() or idea_id
 
-        # If nothing to show (e.g., fully overlapped), skip to avoid random outputs
-        if not turns_block.strip():
+        # Build spans from mentions & mentions_extra
+        spans = _build_spans_from_mentions(idea)
+        if not spans:
+            # No text to show; skip to avoid hallucinated dimensions
             continue
 
-        prev_dims_block = "\n".join(running_criteria) if running_criteria else "(none)"
+        turns_block = _render_turns_block(spans)
+
+        # Previous dimensions: one per line, or (none)
+        prev_dims_block = (
+            "\n".join(running_dims) if running_dims else "(none)"
+        )
+
+        source_texts = idea.get("source_idea_texts") or []
+        source_idea_texts_block = (
+            "\n".join(f"- {t}" for t in source_texts if t) or "- (none)"
+        )
 
         user_prompt = USER_TEMPLATE.format(
-            idea=idea.get("idea", ""),
+            idea_id=idea_id,
+            canonical_idea=canonical_idea,
+            source_idea_texts_block=source_idea_texts_block,
             prev_dims_block=prev_dims_block,
             turns_block=turns_block,
         )
@@ -245,51 +272,51 @@ def main():
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             reasoning_effort="minimal",
-            verbosity="low"
+            verbosity="low",
         )
 
-        if not isinstance(resp, dict):
+        if not isinstance(resp, Dict):
             continue
 
-        norm = _normalize_result(resp)
+        norm = _normalize_result(resp, canonical_idea)
+        norm["idea_id"] = idea_id
         combined_items.append(norm)
 
-        fname = (idea.get("idea", "idea").strip() or "idea").lower()
-        fname = "".join(c if c.isalnum() or c in ("-", "_") else "-" for c in fname)[:80]
-        (per_idea_dir / f"{fname}.json").write_text(
-            json.dumps({
-                "metadata": {"meeting_id": args.meeting_id, "model": args.model, "context": "transcript_mentions_exclusive"},
-                "idea": norm.get("idea", ""),
-                "dimensions": norm.get("dimensions", []),
-            }, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
-
-        # Update running criteria (order-preserving)
-        for d in norm.get("dimensions", []) or []:
+        # Update running dimension list (order-preserving)
+        for d in norm.get("dimensions") or []:
             n = (d.get("name") or "").strip()
-            if n and n not in running_criteria_set:
-                running_criteria.append(n)
-                running_criteria_set.add(n)
+            if n and n not in running_dims_set:
+                running_dims.append(n)
+                running_dims_set.add(n)
 
     # --- Combined meeting-level JSON ---
+    out_json = ctx_out / f"eval_criteria_{args.model}.json"
+    out_payload = {
+        "metadata": {
+            "meeting_id": meeting_id,
+            "model": args.model,
+            "topic": topic,
+            "meeting_type": meeting_type,
+            "num_participants": num_participants,
+            "duration_sec": duration_sec,
+            "context": "idea_eval_dimensions_v1",
+        },
+        "ideas": combined_items,
+    }
     out_json.write_text(
-        json.dumps({
-            "metadata": {"meeting_id": args.meeting_id, "model": args.model, "context": "transcript_mentions_exclusive"},
-            "ideas": combined_items
-        }, indent=2, ensure_ascii=False),
-        encoding="utf-8"
+        json.dumps(out_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
 
     if getattr(args, "write_csv", False):
         rows = _aggregate_csv_rows(combined_items)
-        csv_path = out_json.with_name(out_json.stem + "_scores.csv")
+        csv_path = out_json.with_name(out_json.stem + "_matrix.csv")
         with csv_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerows(rows)
-        print(f"Wrote matrix CSV: {csv_path}")
+        print(f"[csv] wrote dimension presence matrix: {csv_path}")
 
-    print("[criteria_json]", json.dumps(running_criteria, ensure_ascii=False))
+    print("[dims]", json.dumps(running_dims, ensure_ascii=False))
     print(f"[done] {out_json}")
 
 
