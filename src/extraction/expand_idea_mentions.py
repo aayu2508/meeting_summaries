@@ -9,7 +9,7 @@ from .utils.llm_client import init_client, chat_json
 from .utils.common import get_meeting_base_dir
 
 SYSTEM_PROMPT = """
-You identify all transcript segments that refer to this idea, either explicitly or implicitly.”
+You identify all transcript segments that refer to the canonical or source ideas.
 
 You receive:
 - A SINGLE IDEA description for a meeting.
@@ -19,27 +19,42 @@ You receive:
 Your tasks:
 1) EXTRA EXPLICIT MENTIONS
 - Find additional TURNS that clearly refer to the SAME IDEA.
-- These may:
-  - restate the idea,
-  - paraphrase it,
-  - refer back to it.
-- Tag these as role = "explicit".
-- DO NOT include any segment_id that is already in the known core list.
-- DO NOT include generic talk that could be about many or other ideas.
+- A segment counts as "explicit" ONLY if:
+  * it restates the same feature, decision, requirement, or constraint,
+  * OR it continues, refines, clarifies, reverses, narrows, or finalizes the SAME idea,
+  * OR it makes a later decision that directly completes or resolves this idea.
+- The segment must contain a clear textual link to the idea's feature, proposal, property, or requirement.
+- Examples:
+    * Early: "We should make the remote a bright color."
+      Later: "Let's make it yellow then." → MUST tag as explicit.
+    * Early: "We need voice recognition."
+      Later: "Let's not include voice, it's too expensive." → ALSO explicit.
+- Generic talk about the product or design theme is NOT explicit.
+- Do NOT infer connections. A human reader should say: "Yes, this sentence is part of the story of this idea."
+- DO NOT include any segment_id already in the known core list.
 
 2) CONTEXT SEGMENTS
-- Find TURNS that do NOT directly describe the idea but provide IMPORTANT CONTEXT for evaluating it.
-- Context includes constraints, properties, or tradeoffs that obviously matter for this idea.
-Examples:
-  - Earlier discussion about things involved in the idea.
-  - Safety, regulations, cost structure, or user constraints that are clearly relevant.
-- Tag these as role = "context".
+- Find TURNS that do NOT directly describe the idea but provide important context that affects how this idea should be evaluated.
+- Context must relate SPECIFICALLY to THIS idea, not the general product.
+- A segment is context ONLY if:
+  * it introduces constraints, tradeoffs, or reasoning that directly influenced the evolution, feasibility, or decision-making around this idea.
+- Examples of valid context:
+    * Discussion about users losing remotes → context for “bright color for visibility.”
+    * Discussion about battery limits → context for “voice recognition requiring power.”
+- Invalid context:
+    * High-level market trends
+    * Unrelated product features
+    * General meeting logistics
+- Prefer context within +/- 4 turns of explicit mentions unless the relationship is unambiguously tied to this idea.
+- If unsure, DO NOT tag as context.
 
 IMPORTANT RULES
-- If you are unsure if it is about the idea, DO NOT tag the segment.
-- Use ONLY segment_id values that appear in the TURNS section.
+- Use ONLY segment_id values from the TURNS section.
 - Never invent new segment_id values.
-- If you find nothing, return empty lists.
+- A segment must stand on its own as clearly connected to this idea.
+- If the connection is not explicit in the text, do NOT include the segment.
+- If you find no extra explicit mentions or context, return empty lists.
+- If it just 3-4 words which do not clearly link to the idea, do NOT include it.
 
 OUTPUT JSON (no extra keys, no comments):
 {

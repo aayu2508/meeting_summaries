@@ -147,51 +147,53 @@ def fuse_asr_with_diar(
     return outputs
 
 # Build a dense timeline covering every moment of the meeting by inserting explicit "silence" rows between speech segments
-def build_timeline(
-    speech: List[Dict[str, Any]],
-    total_dur: Optional[float],
-    min_silence: float = 0.2
-) -> List[Dict[str, Any]]:
-
+def build_timeline(speech, total_dur, min_silence=0.2):
     if not speech:
         return [{"type": "silence", "start": 0.0, "end": float(total_dur)}] if total_dur else []
 
-    # Sort chronologically
     s = sorted(speech, key=lambda x: x["start"])
-    timeline: List[Dict[str, Any]] = []
 
-    # Leading silence
-    if s[0]["start"] > 0 and s[0]["start"] >= min_silence:
+    merged = []
+    for seg in s:
+        st, en = float(seg["start"]), float(seg["end"])
+        if not merged or st > merged[-1]["end"]:
+            merged.append({"start": st, "end": en})
+        else:
+            # overlap or touch, extend the current window
+            merged[-1]["end"] = max(merged[-1]["end"], en)
+
+    timeline = []
+
+    if merged[0]["start"] >= min_silence:
         timeline.append({
             "type": "silence",
             "start": 0.0,
-            "end": round(s[0]["start"], 2),
+            "end": round(merged[0]["start"], 2),
         })
 
-    # Speech + inter-speech silences
-    for i, seg in enumerate(s):
-        # ensure type is set (safety; should already be "speech")
+    for i, win in enumerate(merged):
+        if i < len(merged) - 1:
+            gap = merged[i + 1]["start"] - win["end"]
+            if gap >= min_silence:
+                timeline.append({
+                    "type": "silence",
+                    "start": round(win["end"], 2),
+                    "end": round(merged[i + 1]["start"], 2),
+                })
+
+    if total_dur and total_dur - merged[-1]["end"] >= min_silence:
+        timeline.append({
+            "type": "silence",
+            "start": round(merged[-1]["end"], 2),
+            "end": round(float(total_dur), 2),
+        })
+
+    for seg in s:
         seg = dict(seg)
         seg["type"] = "speech"
         timeline.append(seg)
 
-        if i < len(s) - 1:
-            gap = s[i + 1]["start"] - seg["end"]
-            if gap >= min_silence:
-                timeline.append({
-                    "type": "silence",
-                    "start": round(seg["end"], 2),
-                    "end": round(s[i + 1]["start"], 2),
-                })
-
-    # Trailing silence
-    if total_dur and total_dur - s[-1]["end"] >= min_silence:
-        timeline.append({
-            "type": "silence",
-            "start": round(s[-1]["end"], 2),
-            "end": round(float(total_dur), 2),
-        })
-
+    timeline.sort(key=lambda x: x["start"])
     return timeline
 
 def main():

@@ -6,7 +6,7 @@ from .utils.llm_client import init_client, chat_json
 from .utils.common import get_meeting_base_dir, load_metadata
 
 REFLECTION_SYSTEM_PROMPT = """
-You are an idea reflection and consolidation tool for a single meeting.
+You are an idea reflection and consolidation tool for a single meeting defined by the topic in the metadata.
 
 You receive:
 - METADATA about the meeting
@@ -17,7 +17,7 @@ You receive:
       segment_id, speaker, start, end, text, and chunk_id context
 
 Your job is to:
-1) Decide which candidate ideas are genuine, on-topic ideas and which should be discarded.
+1) Decide which candidate local ideas are on-topic ideas and which should be discarded.
 2) Merge semantically equivalent or very similar ideas across chunks into consolidated ideas.
 3) Provide supporting quotes for each consolidated idea from the underlying mentions.
 
@@ -92,8 +92,8 @@ MENTIONS AND SUPPORTING QUOTES
 
 DISCARDED IDEAS
 - source_idea_ids and source_idea_texts should list all the ideas that you are discarding in that entry.
-- Discard only if the idea is clearly off-topic, non-actionable, purely conversational, or not a solution/design proposal.
-- reason should be specific and human-readable.
+- Discard only if the idea is clearly off-topic from the meeting topic, non-actionable, purely conversational, or not a solution/design proposal.
+- Reason should be specific and human-readable.
 
 GENERAL RULES
 - Use ONLY information present in the provided JSON and metadata.

@@ -46,22 +46,12 @@ def _compute_idea_stats(ideas_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
       - who brought up the idea (first mention)
       - who is primary contributor (most mentions, then speaking time)
       - first_seen / last_seen for idea span
-    Assumes schema per idea:
-      {
-        "idea_id": "I1",
-        "canonical_idea": "...",
-        "mentions": [
-          {
-            "segment_id": "m0001",
-            "speaker": "SPEAKER_00",
-            "start": 857.686,
-            "end": 865.482,
-            "text": "...",
-            ...
-          },
-          ...
-        ]
-      }
+
+    IMPORTANT:
+    - Timeline fields (first_seen_sec / last_seen_sec / span_duration_sec)
+      are computed ONLY from core `mentions`.
+    - `mentions_extra` is INCLUDED in speaker stats, but does NOT affect
+      the idea window timeline.
     """
     out: List[Dict[str, Any]] = []
     ideas_list = ideas_doc.get("ideas") or []
@@ -69,10 +59,13 @@ def _compute_idea_stats(ideas_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     for idea in ideas_list:
         idea_id = idea.get("idea_id") or ""
         title = (idea.get("canonical_idea") or idea.get("idea") or idea_id or "").strip()
-        mentions = idea.get("mentions") or []
 
-        # If no mentions, record minimal info and continue
-        if not mentions:
+        core_mentions = idea.get("mentions") or []
+        extra_mentions = idea.get("mentions_extra") or []
+        all_mentions = list(core_mentions) + list(extra_mentions)
+
+        # If no mentions at all, record minimal info and continue
+        if not all_mentions:
             out.append({
                 "idea_id": idea_id,
                 "idea": title,
@@ -89,19 +82,24 @@ def _compute_idea_stats(ideas_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
             })
             continue
 
-        # Aggregate per-speaker stats
+        # ---------------------
+        # Per-speaker aggregation
+        # ---------------------
         per_spk: Dict[str, Dict[str, Any]] = {}
-        first_seen = float("inf")
-        last_seen = 0.0
 
-        for m in mentions:
+        # Timeline: only from core mentions
+        if core_mentions:
+            first_seen_core = float("inf")
+            last_seen_core = 0.0
+        else:
+            first_seen_core = float("inf")
+            last_seen_core = 0.0
+
+        for m in all_mentions:
             spk_full = str(m.get("speaker", "S?"))
             start = float(m.get("start", 0.0))
             end = float(m.get("end", start))
             dur = max(0.0, end - start)
-
-            first_seen = min(first_seen, start)
-            last_seen = max(last_seen, end)
 
             if spk_full not in per_spk:
                 per_spk[spk_full] = {
@@ -117,7 +115,15 @@ def _compute_idea_stats(ideas_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
             st["total_speaking_time_sec"] += dur
             st["first_mention_time_sec"] = min(st["first_mention_time_sec"], start)
 
-        # Determine initiator (brought up) = earliest first_mention_time
+        # Update timeline bounds using ONLY core mentions
+        if core_mentions:
+            for m in core_mentions:
+                start = float(m.get("start", 0.0))
+                end = float(m.get("end", start))
+                first_seen_core = min(first_seen_core, start)
+                last_seen_core = max(last_seen_core, end)
+
+        # Determine initiator (brought up) = earliest first_mention_time across ALL mentions
         initiator_full = None
         initiator_short = None
         if per_spk:
@@ -142,15 +148,23 @@ def _compute_idea_stats(ideas_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
             key=lambda d: (-d["num_mentions"], d["first_mention_time_sec"])
         )
 
-        span_duration = max(0.0, last_seen - first_seen) if first_seen < float("inf") else 0.0
+        # Span duration: based on core mentions only
+        if core_mentions and first_seen_core < float("inf"):
+            span_duration = max(0.0, last_seen_core - first_seen_core)
+            first_seen_out = first_seen_core
+            last_seen_out = last_seen_core
+        else:
+            span_duration = 0.0
+            first_seen_out = None
+            last_seen_out = None
 
         out.append({
             "idea_id": idea_id,
             "idea": title,
             "num_mentions": int(sum(d["num_mentions"] for d in per_spk.values())),
             "num_speakers": len(per_spk),
-            "first_seen_sec": None if first_seen == float("inf") else first_seen,
-            "last_seen_sec": last_seen,
+            "first_seen_sec": first_seen_out,
+            "last_seen_sec": last_seen_out,
             "span_duration_sec": span_duration,
             "initiator_speaker_full": initiator_full,
             "initiator_speaker_short": initiator_short,
@@ -204,7 +218,10 @@ def _write_ideas_text_summary(
         fs = it.get("first_seen_sec")
         le = it.get("last_seen_sec")
         if fs is not None and le is not None:
-            lines.append(f"  Span: {fs:.2f}s → {le:.2f}s (duration {it.get('span_duration_sec', 0.0):.2f}s)")
+            lines.append(
+                f"  Span: {fs:.2f}s → {le:.2f}s "
+                f"(duration {it.get('span_duration_sec', 0.0):.2f}s)"
+            )
         initiator = it.get("initiator_speaker_short") or it.get("initiator_speaker_full")
         primary = it.get("primary_contributor_speaker_short") or it.get("primary_contributor_speaker_full")
         if initiator:
@@ -237,6 +254,9 @@ def _plot_idea_timeline(
 ) -> None:
     """
     Plot each idea as a horizontal bar from first_seen_sec to last_seen_sec.
+
+    Only ideas with a non-None first_seen_sec (i.e., at least one core mention)
+    are plotted.
     """
     ideas = [it for it in ideas_summary if it.get("first_seen_sec") is not None]
 
@@ -296,6 +316,8 @@ def _wrap(text: str, width: int) -> str:
 def load_mentions_from_reflected(ideas_doc: Dict[str, Any]) -> pd.DataFrame:
     """
     From ideas_reflected_<extract>_<reflect>.json build (speaker, idea) rows.
+
+    Uses ONLY core `mentions` for the bipartite edges.
     """
     rows: List[Dict[str, Any]] = []
     for idea in (ideas_doc.get("ideas") or []):
@@ -472,11 +494,11 @@ def main() -> None:
     _write_ideas_json_summary(json_out, args.meeting_id, ideas_summary, extract_tag, reflect_tag)
     _write_ideas_text_summary(txt_out, args.meeting_id, ideas_summary)
 
-    # 3) Ideas timeline plot
+    # 3) Ideas timeline plot (uses ONLY core mentions for windows)
     tl_out = plots_dir / f"{args.meeting_id}_ideas_timeline_{extract_tag}_{reflect_tag}.png"
     _plot_idea_timeline(ideas_summary, args.title_timeline, tl_out)
 
-    # 4) Speaker–Idea bipartite plot
+    # 4) Speaker–Idea bipartite plot (also based only on core mentions)
     df = load_mentions_from_reflected(ideas_doc)
     support = build_support_count(df)
     bp_out = plots_dir / f"{args.meeting_id}_speaker_idea_bipartite_{extract_tag}_{reflect_tag}.png"

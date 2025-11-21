@@ -6,7 +6,7 @@ from .utils.llm_client import init_client, chat_json
 from .utils.common import load_metadata, get_meeting_base_dir
 
 SYSTEM_PROMPT = """
-You are an idea extraction tool.
+You are an idea extraction tool for the given meeting topic.
 Return valid JSON with this schema (no extra keys, no comments):
 {
   "chunk_id": "chunk identifier",
@@ -25,6 +25,8 @@ Return valid JSON with this schema (no extra keys, no comments):
 
 DEFINITIONS
 - An idea must propose a specific solution, plan, feature, or design direction that contributes to the meeting topic.
+- Treat requirements, constraints, target users, evaluation criteria, and tradeoffs as ideas when they are phrased as proposals or decisions.
+- Ignore purely procedural or meeting-management talk unless it introduces a concrete product or design decision.
 - Extract ideas based ONLY on the turns in this chunk.
 - Include ideas that you are uncertain about.
 

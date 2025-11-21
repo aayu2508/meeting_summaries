@@ -37,6 +37,89 @@ def _compute_meeting_bounds(segments: List[Dict[str, Any]]) -> Tuple[float, floa
     return min(starts), max(ends)
 
 
+def _normalize_timeline(
+    segments: List[Dict[str, Any]],
+    meeting_start: float,
+    meeting_end: float,
+    min_silence: float = 0.2,
+) -> List[Dict[str, Any]]:
+    """
+    Rebuild the timeline so that:
+      - speech segments are kept as is
+      - SILENCE segments are recomputed as the complement of any speech
+        across all speakers within [meeting_start, meeting_end]
+
+    This guarantees that silence never overlaps with speech.
+    """
+
+    # Keep only speech segments from the original
+    speech = [
+        dict(seg) for seg in segments
+        if seg.get("type", "speech") == "speech"
+    ]
+
+    if not speech:
+        dur = max(0.0, meeting_end - meeting_start)
+        if dur >= min_silence:
+            return [{
+                "type": "silence",
+                "start": float(meeting_start),
+                "end": float(meeting_end),
+            }]
+        return []
+
+    # Sort by start time
+    speech.sort(key=lambda s: float(s.get("start", 0.0)))
+
+    # Build merged "anyone is speaking" intervals
+    merged: List[Dict[str, float]] = []
+    for seg in speech:
+        st = max(float(seg.get("start", 0.0)), meeting_start)
+        en = min(float(seg.get("end", st)), meeting_end)
+        if not merged:
+            merged.append({"start": st, "end": en})
+        else:
+            last = merged[-1]
+            if st <= last["end"]:  # overlap or touch
+                last["end"] = max(last["end"], en)
+            else:
+                merged.append({"start": st, "end": en})
+
+    # Compute silence intervals as gaps between merged speech windows
+    silences: List[Dict[str, Any]] = []
+    prev_end = meeting_start
+
+    for win in merged:
+        gap_start = prev_end
+        gap_end = win["start"]
+        if gap_end - gap_start >= min_silence:
+            silences.append({
+                "type": "silence",
+                "start": round(gap_start, 2),
+                "end": round(gap_end, 2),
+            })
+        prev_end = max(prev_end, win["end"])
+
+    # Trailing silence
+    if meeting_end - prev_end >= min_silence:
+        silences.append({
+            "type": "silence",
+            "start": round(prev_end, 2),
+            "end": round(float(meeting_end), 2),
+        })
+
+    # Combine speech segments (as speech) plus rebuilt silence and sort by time
+    cleaned: List[Dict[str, Any]] = []
+    for seg in speech:
+        seg = dict(seg)
+        seg["type"] = "speech"
+        cleaned.append(seg)
+
+    cleaned.extend(silences)
+    cleaned.sort(key=lambda s: float(s.get("start", 0.0)))
+    return cleaned
+
+
 def _compute_participation(
     segments: List[Dict[str, Any]]
 ) -> Tuple[Dict[str, Any], float, float]:
@@ -178,7 +261,6 @@ def _compute_longest_streaks(
             current_end = e
         elif spk == current_spk:
             # extend streak
-            # we assume no overlapping segments for a speaker
             current_end = max(current_end, e)
         else:
             # speaker change breaks streak
@@ -218,7 +300,7 @@ def _finalize_speaker_percentages_and_avg(
 
 def _speaker_order_for_plot(segments: List[Dict[str, Any]]) -> List[str]:
     """
-    Decide y-axis order for speakers in plot: first actual speakers, then 'SILENCE' if present.
+    Decide y axis order for speakers in plot: first actual speakers, then 'SILENCE' if present.
     """
     seen = set()
     order: List[str] = []
@@ -419,7 +501,7 @@ def _write_text_summary(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Compute meeting-level conversation dynamics and timeline plot."
+        description="Compute meeting level conversation dynamics and timeline plot."
     )
     ap.add_argument(
         "--meeting-id",
@@ -442,9 +524,17 @@ def main() -> None:
     if not segments:
         raise SystemExit(f"No segments found in {transcript_path}")
 
-    # Meeting bounds
+    # Meeting bounds from raw transcript
     meeting_start, meeting_end = _compute_meeting_bounds(segments)
     total_meeting_duration = max(0.0, meeting_end - meeting_start)
+
+    # Rebuild silence so it never overlaps with speech
+    segments = _normalize_timeline(
+        segments,
+        meeting_start=meeting_start,
+        meeting_end=meeting_end,
+        min_silence=0.2,
+    )
 
     # Participation per speaker
     speakers_stats, total_speech_time, total_silence_time = _compute_participation(
@@ -460,7 +550,7 @@ def main() -> None:
     # Total speaker changes
     total_turns = _compute_turn_changes(segments)
 
-    # JSON + text summaries
+    # JSON and text summaries
     json_out = base / "conversation_dynamics_meeting.json"
     txt_out = base / "conversation_dynamics_meeting.txt"
     _write_json_summary(
@@ -484,7 +574,7 @@ def main() -> None:
         streaks_info,
     )
 
-    # Timeline plot with silence
+    # Timeline plot with rebuilt silence
     plots_dir = base / "plots"
     out_plot = plots_dir / f"{args.meeting_id}_timeline.png"
     _plot_timeline(segments, args.meeting_id, args.title, out_plot)
