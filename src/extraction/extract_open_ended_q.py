@@ -7,50 +7,40 @@ from .utils.llm_client import init_client, chat_json
 from .utils.common import load_metadata, get_meeting_base_dir
 
 SYSTEM_PROMPT = """
-You are an unanswered-question extraction tool.
+You are a tool that extracts unresolved, open-ended questions from a meeting.
 
-You receive:
-- The full meeting transcript as an ordered list of TURNS. Each TURN contains: segment_id, speaker, start, end, text.
+INPUT
+- You receive the full meeting transcript as an ordered list of TURNS.
+- Each TURN has: segment_id, speaker, start, end, text.
 
-INTERPRETATION RULES — EXTREMELY IMPORTANT
-1. You MUST ground everything in the transcript text.
-   - If the text does not clearly show that a question was raised, OMIT IT.
-   - If the text does not clearly show that the question remained unresolved, OMIT IT.
+CORE RULES
+1. Ground everything in the transcript text.
+   - Only include questions that are clearly asked or very explicitly raised as decisions (for example, "We still need to decide X").
+   - If the text does not clearly show that a question was raised, do not include it.
 
-2. You must be CONSERVATIVE.
-   - When in doubt, the correct behavior is to EXCLUDE the question.
+2. Be conservative.
+   - When in doubt, exclude the question.
+   - Do not invent or infer questions from domain knowledge.
 
-3. Do NOT infer questions.
-   - A question must be explicitly asked OR strongly implied as a concrete decision point (e.g., “We still need to decide X…”).
-   - Generic, domain-knowledge-based questions are forbidden.
-
-4. Do NOT include:
-   - Small-talk or logistics
-   - Hypothetical musings that were not actually proposed as decisions
-   - Questions that were fully answered later
-   - Questions that are not clearly connected to the meeting topic
-   - Vague uncertainties (“I'm not sure what he means…”) unless they point to a real design choice
-
-5. STRICT RESOLUTION CHECK:
-   - For every candidate question, you MUST scan ALL LATER TURNS.
-   - If you find any clear answer, decision, or resolution, mark the question as RESOLVED and EXCLUDE it.
-   - If the discussion partially addresses the question but leaves an open decision, mark it PARTIALLY_ANSWERED.
+3. Resolution scan (required).
+   - For every candidate question, scan ALL later TURNS.
+   - If you find any clear answer, decision, or resolution, treat the question as resolved and EXCLUDE it.
+   - If the discussion addresses the question but the outcome remains unclear or deferred, mark it as PARTIALLY_ANSWERED.
    - Only include UNANSWERED or PARTIALLY_ANSWERED questions in the output.
 
-6. NO DOUBLE COUNTING:
-   - If multiple turns ask the same underlying question, merge them into ONE question.
-
-7. NO HALLUCINATIONS:
-   - All output must be supported by specific segment_ids and text quotes.
-   - If the evidence is weak, the question must be excluded.
-
 DEFINITIONS
-- OPEN-ENDED = requires exploration (How, What, Why, Which, When, Who).
-- CLOSED/NOT ELIGIBLE = yes/no, factual lookup, or easily answered locally.
-- UNANSWERED = no later resolution of any kind.
-- PARTIALLY_ANSWERED = some discussion but outcome is unclear or deferred.
+- OPEN_ENDED: Requires exploration (how, what, why, which, when, who, or similar).
+- NOT_ELIGIBLE: Yes or no questions, simple factual lookups, or questions that are easily answered locally.
+- UNANSWERED: No later resolution of any kind.
+- PARTIALLY_ANSWERED: Some later discussion but the final decision or outcome is still unclear.
 
-OUTPUT JSON ONLY (no extra text, no comments):
+NO HALLUCINATIONS
+- Every question must be supported by specific segment_ids and text quotes from the transcript.
+- If the evidence is weak or ambiguous, exclude the question.
+
+OUTPUT
+Return ONLY valid JSON with this schema (no extra text, no comments):
+
 {
   "metadata": {
     "meeting_id": "MEETING_ID",
@@ -62,6 +52,12 @@ OUTPUT JSON ONLY (no extra text, no comments):
       "question_id": "Q1",
       "question_text": "10-40 word paraphrase of the open-ended question",
       "source_segments": ["m000123", "m000127"],
+      "source_mentions": [
+        {
+          "segment_id": "m000123",
+          "text": "Short quote where the question appears in the transcript"
+        }
+      ],
       "status": "unanswered | partially_answered",
       "justification": "1-3 sentences grounded in transcript text, not speculation."
     }
@@ -69,8 +65,13 @@ OUTPUT JSON ONLY (no extra text, no comments):
 }
 
 If there are NO valid unanswered questions, output:
+
 {
-  "metadata": {...},
+  "metadata": {
+    "meeting_id": "MEETING_ID",
+    "model": "MODEL_USED",
+    "context": "open_questions_v1"
+  },
   "open_questions": []
 }
 """
