@@ -16,7 +16,6 @@ build/
 dist/
 
 # --- DATA & AUDIO ---
-*.wav
 *.mp3
 *.flac
 *.m4a
@@ -25,6 +24,7 @@ data/
 outputs/
 logs/
 cache/
+brainstorming/
 *.txt
 .png
 
@@ -64,7 +64,6 @@ src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/bf2a9746382e1
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/blobs/c9074644d9d1205686f16d411564729461324b75
 src/ingest_asr_diar/models--Systran--faster-whisper-large-v2/refs/main
 download.sh
-amicorpus/ES2002a/audio/ES2002a.Mix-Headset.wav.1
 CCBY4.0.txt.1
 _sb_cache_speechbrain_emotion-recognition-wav2vec2-IEMOCAP/hyperparams.yaml
 wav2vec2_checkpoints/.locks/models--facebook--wav2vec2-base/3f24dc078fcba55ee1d417a413847ead40c093a3.lock
