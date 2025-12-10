@@ -39,7 +39,7 @@ BASE_ENV["PYTHONPATH"] = str(SRC_DIR) + os.pathsep + BASE_ENV.get("PYTHONPATH", 
 MOD_AUDIO   = "ingest_asr_diar.audio_processing"
 MOD_DIAR    = "ingest_asr_diar.diarization"
 MOD_ASR     = "ingest_asr_diar.transcribe"
-MOD_CHUNK   = "chunking.chunk_transcript"
+MOD_CHUNK   = "chunking.chunker"
 MOD_IDEAS_R = "extraction.extract_ideas_raw"
 MOD_IDEAS_F = "extraction.reflect_ideas"
 
