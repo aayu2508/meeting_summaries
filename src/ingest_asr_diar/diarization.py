@@ -1,17 +1,43 @@
 # diarization.py
+import torch  
 import os, json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import argparse
 from dotenv import load_dotenv
+import torchaudio
+
+if not hasattr(torchaudio, "list_audio_backends"):
+    # Provide a dummy implementation so SpeechBrain's check doesn't crash.
+    # torchaudio will still use its normal default backend for I/O.
+    def _fake_list_audio_backends():
+        # Pretend we have at least one backend available.
+        return ["sox_io"]
+
+    torchaudio.list_audio_backends = _fake_list_audio_backends
+
 from pyannote.audio import Pipeline
 from pyannote.audio.pipelines.utils.hook import ProgressHook
 
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
-MERGE_GAP_S = 0.5      
+MERGE_GAP_S = 0.5
 OVERLAP_JOIN_S = 0.02
+
+
+def get_device(choice: str) -> str:
+    """
+    choice: 'auto', 'cpu', or 'cuda'
+    returns 'cpu' or 'cuda'
+    """
+    if choice == "cpu":
+        return "cpu"
+    if choice == "cuda":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    # auto
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -29,7 +55,7 @@ def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     for nxt in turns[1:]:
         same = nxt["speaker"] == cur["speaker"]
-        gap = float(nxt["start"]) - float(cur["end"])  
+        gap = float(nxt["start"]) - float(cur["end"])
 
         if same and (-OVERLAP_JOIN_S <= gap <= MERGE_GAP_S):
             cur["end"] = max(cur["end"], nxt["end"])
@@ -40,22 +66,37 @@ def merge_microturns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     merged.append(cur)
     return merged
 
-def diarize(wav_path: Path, num_speakers: Optional[int] = None) -> List[Dict[str, Any]]:
+
+def build_pipeline(device: str) -> Pipeline:
     if HF_TOKEN is None:
         raise RuntimeError("HF_TOKEN not set (export HF_TOKEN=<your_hf_token>)")
 
+    print(f"[diar] loading pyannote pipeline on device={device}")
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1",
         token=HF_TOKEN,
-        cache_dir="data/cache"
+        cache_dir="data/cache",
     )
 
+    if device == "cuda":
+        pipeline.to(torch.device("cuda"))
+
+    return pipeline
+
+
+def diarize(
+    wav_path: Path,
+    num_speakers: Optional[int] = None,
+    device: str = "cpu",
+) -> List[Dict[str, Any]]:
+
+    pipeline = build_pipeline(device)
+
     with ProgressHook() as hook:
-        output = (
-            pipeline(str(wav_path), hook=hook, num_speakers=num_speakers)
-            if num_speakers else
-            pipeline(str(wav_path), hook=hook)
-        )
+        if num_speakers:
+            output = pipeline(str(wav_path), hook=hook, num_speakers=num_speakers)
+        else:
+            output = pipeline(str(wav_path), hook=hook)
 
     turns: List[Dict[str, Any]] = []
     for turn, speaker in output.speaker_diarization:
@@ -64,11 +105,21 @@ def diarize(wav_path: Path, num_speakers: Optional[int] = None) -> List[Dict[str
             turns.append({"start": start, "end": end, "speaker": f"{speaker}"})
     return turns
 
+
 def main():
     ap = argparse.ArgumentParser("Speaker Diarization")
     ap.add_argument("--meeting-id", required=True, help="Meeting ID")
     ap.add_argument("--num-speakers", type=int, default=None, help="Optional fixed number of speakers")
+    ap.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device for diarization models (default: auto)",
+    )
     args = ap.parse_args()
+
+    device = get_device(args.device)
+    print(f"[diar] effective device: {device}")
 
     out_dir = Path("data/outputs") / args.meeting_id
     wav = out_dir / "audio_16k_mono.wav"
@@ -78,7 +129,7 @@ def main():
     clean_json = out_dir / "diarization.json"
 
     print(f"[diar] running diarization on {wav.name} ...")
-    raw_turns = diarize(wav, num_speakers=args.num_speakers)
+    raw_turns = diarize(wav, num_speakers=args.num_speakers, device=device)
     print(f"[diar] raw segments: {len(raw_turns)}")
     raw_json.write_text(json.dumps(raw_turns, indent=2))
 

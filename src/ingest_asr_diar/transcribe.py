@@ -7,10 +7,32 @@ import argparse
 from .audio_utils import get_media_duration_seconds
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
+import torch  
 
 load_dotenv()
 ASR_MODEL = os.getenv("ASR_MODEL", "medium")  # e.g., "base", "small", "medium", "large-v3"
-ASR_DEVICE = os.getenv("ASR_DEVICE", "cpu")   # "cpu" or "cuda"
+ASR_DEVICE_ENV = os.getenv("ASR_DEVICE", None)  # optional, can still use this
+
+
+def pick_asr_device(cli_choice: str) -> str:
+    """
+    cli_choice: 'auto', 'cpu', 'cuda', or 'env'
+    returns 'cpu' or 'cuda'
+    """
+    if cli_choice == "cpu":
+        return "cpu"
+    if cli_choice == "cuda":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if cli_choice == "env":
+        if ASR_DEVICE_ENV in ("cpu", "cuda"):
+            if ASR_DEVICE_ENV == "cuda" and not torch.cuda.is_available():
+                print("[asr] ASR_DEVICE=cuda but no GPU available, falling back to cpu")
+                return "cpu"
+            return ASR_DEVICE_ENV or "cpu"
+        return "cpu"
+    # auto
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
 
 # To check intersection between two half open time intervals
 def intersects(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -52,28 +74,25 @@ def compute_overlap_regions(
 
 def transcribe_full(wav_path: Path, model_name: str, device: str):
     compute_type = "int8" if device == "cpu" else "float16"
-    print(f"[asr] loading model {model_name} ({device}, {compute_type})")
+    print(f"[asr] loading model {model_name} (device={device}, compute_type={compute_type})")
     model = WhisperModel(model_name, device=device, compute_type=compute_type)
 
-    # Keep short interjections: vad_filter=False + gentle decoding thresholds.
-    # initial_prompt nudges the model not to drop fillers like "yeah/okay".
     full_iter, _ = model.transcribe(
         str(wav_path),
         task="transcribe",
-        vad_filter=False,                  # do not filter out short utterances
-        word_timestamps=True,              # needed for word-level alignment
+        vad_filter=False,
+        word_timestamps=True,
         temperature=0.0,
         beam_size=5,
         language="en",
-        condition_on_previous_text=False, 
-        no_speech_threshold=0.2, 
-        log_prob_threshold=-1.5, 
-        compression_ratio_threshold=2.4, 
-        initial_prompt="Include all short responses like yeah, okay, mm-hmm, uh-huh, right, sure, haha."
+        condition_on_previous_text=False,
+        no_speech_threshold=0.2,
+        log_prob_threshold=-1.5,
+        compression_ratio_threshold=2.4,
+        initial_prompt="Include all short responses like yeah, okay, mm-hmm, uh-huh, right, sure, haha.",
     )
     return list(full_iter)
 
-# Collect ASR words whose midpoints fall inside the diar window (with slack), or that overlap at least a fraction of their duration.
 def fuse_asr_with_diar(
     diar_segments: List[Dict[str, Any]],
     asr_segments: List[Any],
@@ -84,9 +103,8 @@ def fuse_asr_with_diar(
 
     outputs = []
 
-    # Alignment tweaks to better capture short interjections near boundaries:
-    eps_mid = 0.18   # slack around diar window for midpoint test (seconds)
-    min_word_overlap_frac = 0.20  # fallback: keep word if >=20% overlaps
+    eps_mid = 0.18
+    min_word_overlap_frac = 0.20
 
     for idx, seg in enumerate(diar_segments):
         start, end = float(seg["start"]), float(seg["end"])
@@ -98,12 +116,10 @@ def fuse_asr_with_diar(
             a_s = asr_seg.start or 0.0
             a_e = asr_seg.end or a_s
 
-            # collect logprobs for a soft confidence (optional)
             if hasattr(asr_seg, "avg_logprob") and asr_seg.avg_logprob is not None:
                 if intersects(start, end, a_s, a_e):
                     lps.append(asr_seg.avg_logprob)
 
-            # collect words if their midpoints fall in diar window (with slack)
             if getattr(asr_seg, "words", None):
                 for w in asr_seg.words:
                     ws = w.start or 0.0
@@ -128,15 +144,12 @@ def fuse_asr_with_diar(
                             if wt:
                                 words_in_seg.append(wt)
 
-        # finalize text + a soft confidence score
         text = " ".join(words_in_seg).strip()
-
-        # overlapping speech indicator (useful for interactivity/visuals)
         ov = any(intersects(start, end, r["start"], r["end"]) for r in overlap_regions)
 
         outputs.append({
-            "type": "speech",                           # speech row (silences added later)
-            "segment_id": f"{segment_prefix}{idx:06d}", # stable id for later chunking
+            "type": "speech",
+            "segment_id": f"{segment_prefix}{idx:06d}",
             "start": round(start, 4),
             "end": round(end, 4),
             "speaker": seg["speaker"],
@@ -146,7 +159,7 @@ def fuse_asr_with_diar(
 
     return outputs
 
-# Build a dense timeline covering every moment of the meeting by inserting explicit "silence" rows between speech segments
+
 def build_timeline(speech, total_dur, min_silence=0.2):
     if not speech:
         return [{"type": "silence", "start": 0.0, "end": float(total_dur)}] if total_dur else []
@@ -159,7 +172,6 @@ def build_timeline(speech, total_dur, min_silence=0.2):
         if not merged or st > merged[-1]["end"]:
             merged.append({"start": st, "end": en})
         else:
-            # overlap or touch, extend the current window
             merged[-1]["end"] = max(merged[-1]["end"], en)
 
     timeline = []
@@ -196,10 +208,20 @@ def build_timeline(speech, total_dur, min_silence=0.2):
     timeline.sort(key=lambda x: x["start"])
     return timeline
 
+
 def main():
     ap = argparse.ArgumentParser("Transcription")
     ap.add_argument("--meeting-id", required=True, help="Meeting ID")
+    ap.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda", "env"],
+        help="ASR device (default: auto, env uses ASR_DEVICE)",
+    )
     args = ap.parse_args()
+
+    effective_device = pick_asr_device(args.device)
+    print(f"[asr] effective device: {effective_device}  (ASR_MODEL={ASR_MODEL})")
 
     out_dir = Path("data/outputs") / args.meeting_id
     wav = out_dir / "audio_16k_mono.wav"
@@ -212,11 +234,9 @@ def main():
     diar_raw = json.loads(diar_raw_p.read_text())
     diar_merged = json.loads(diar_merged_p.read_text())
 
-    # Transcribe once (to speed up the process)
     print(f"[asr] transcribing full audio …")
-    asr_segments = transcribe_full(wav, ASR_MODEL, ASR_DEVICE)
+    asr_segments = transcribe_full(wav, ASR_MODEL, effective_device)
 
-    # Overlap regions from RAW (most faithful to interaction)
     print(f"[asr] computing overlap regions (from RAW) …")
     overlap_regions = compute_overlap_regions(diar_raw, min_overlap_ms=40)
     total_dur = get_media_duration_seconds(wav)
@@ -226,7 +246,7 @@ def main():
         diar_segments=diar_raw,
         asr_segments=asr_segments,
         overlap_regions=overlap_regions,
-        segment_prefix="r",  # r000001, r000002, ...
+        segment_prefix="r",
     )
     timeline_raw = build_timeline(speech_raw, total_dur, min_silence=0.2)
     out_raw_json = out_dir / "transcript_raw.json"
@@ -237,18 +257,18 @@ def main():
     speech_merged = fuse_asr_with_diar(
         diar_segments=diar_merged,
         asr_segments=asr_segments,
-        overlap_regions=overlap_regions,  # still computed from RAW (more precise)
-        segment_prefix="m",  # m000001, m000002, ...
+        overlap_regions=overlap_regions,
+        segment_prefix="m",
     )
     timeline_merged = build_timeline(speech_merged, total_dur, min_silence=0.2)
     out_merged_json = out_dir / "transcript_merged.json"
     out_merged_json.write_text(json.dumps(timeline_merged, ensure_ascii=False, indent=2))
     print(f"[done] saved: {out_merged_json}")
 
-    # Canonical transcript: choose RAW by default (swap to merged if preferred)
     out_json = out_dir / "transcript.json"
     out_json.write_text(json.dumps(timeline_merged, ensure_ascii=False, indent=2))
-    print(f"[done] canonical: {out_json} (RAW-aligned)")
+    print(f"[done] canonical: {out_json} (merged diarization)")
+
 
 if __name__ == "__main__":
     main()
